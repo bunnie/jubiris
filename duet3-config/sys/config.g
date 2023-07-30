@@ -5,7 +5,7 @@
 ;-------------------------------------------------------------------------------
 M550 P"Jubilee"           ; Name used in UI and for mDNS  http://Jubilee.local
 ; Networking handled by Duet.
-; Comment out the next three lines only if running the Duet in SBC Mode with Pi.
+; Setup for static IP on local network.
 M552 P10.0.245.6 S1
 M554 10.0.245.1
 M553 P255.255.255.0
@@ -110,23 +110,9 @@ G31 K0 X0 Y0 Z-2        ; Set the limit switch as the "Control Point"
 
 ; Set axis software limits and min/max switch-triggering positions.
 ; Dimensions are adjusted such that (0,0) lies at the lower left corner
-of a centered 300x300mm square in the 305mmx305mm build plate.
+; of a centered 300x300mm square in the 305mmx305mm build plate.
 M208 X-13.75:313.75 Y-44:341 Z0:300
 M208 U0:200            ; Set Elastic Lock (U axis) max rotation angle
-
-
-; Bed Heater and Temperature Sensor
-;-------------------------------------------------------------------------------
-; Define Built-in Thermistor Settings
-M308 S0 P"temp0" Y"thermistor" T100000 B3950 A"Bed" ; built-in Keenovo thermistor
-; Define Heater 0
-M950 H0 C"out0" T0      ; H = Heater 0
-                        ; C = heater output pin
-                        ; T = assigned temperature sensor
-M143 H0 S130            ; Set max bed temperature to 130C    
-M140 H0                 ; Assign Heater 0 to the bed
-
-; This config requires a heater-tuning procedure to produce a valid M307 command.
 
 
 M98  P"/sys/toffsets.g" ; Load tool offsets from the Control Point from ext file.
