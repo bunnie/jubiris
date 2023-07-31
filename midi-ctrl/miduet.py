@@ -14,58 +14,159 @@ import mido
 import json
 import time
 import pprint
+import logging
+import re
 
 SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 2
+MAX_POI = 3
 
-def ser_cmd(ser, cmd):
-    cmd_bytes = bytes(cmd + '\n', 'utf-8')
-    print(str(cmd_bytes, 'utf-8'))
-    ser.write(cmd_bytes)
-    line = ''
-    timeout = True
-    while True:
-        c = ser.read(1)
-        if len(c) == 0:
-            break
-        line += c.decode('utf-8')
-        if 'ok\n' in line:
-            timeout = False
-            break
+class Jubilee:
+    def __init__(self, port):
+        self.port = port
+        try:
+            ser = serial.Serial(port, 115200, timeout = 1.0)
+            logging.debug("Duet3D serial port opened")
+            self.ser = ser
+            self.motors_off()
+            self.poi = [()] * MAX_POI # this will be a list of x/y/z tuples that set points of interest
+        except serial.SerialException as e:
+            logging.error(f"Serial error: {e}")
+            return None
 
-    return timeout
+    def __enter__(self):
+        return self
 
-def step_axis(ser, name, step):
-    if step == 0.0:
-        return
-    # "home" the machine
-    ser_cmd(ser, 'G91')
-    if 'x' in name:
-        ser_cmd(ser, f'G1 X{step}')
-    elif 'y' in name:
-        ser_cmd(ser, f'G1 Y{step}')
-    elif 'z' in name:
-        ser_cmd(ser, f'G1 Z{step}')
-    else:
-        print('axis not yet implemented')
+    def send_cmd(self, cmd, timeout=1.0):
+        cmd_bytes = bytes(cmd + '\n', 'utf-8')
+        logging.debug(str(cmd_bytes, 'utf-8'))
+        self.ser.write(cmd_bytes)
+        line = ''
+        timeout = True
+        while True:
+            c = self.ser.read(1)
+            if len(c) == 0:
+                break
+            line += c.decode('utf-8')
+            if 'ok\n' in line:
+                timeout = False
+                break
 
-def loop(args, ser, midi_in, schema):
-    # clear any stray events in the queue
-    for msg in midi_in.iter_pending():
+        logging.debug(line)
+        return timeout
+
+    def step_axis(self, axis, step):
+        if not self.is_on():
+            return False # don't return an error, just silently fail
+        if step == 0.0:
+            return False
+
+        if 'x' in axis:
+            self.x += step
+            self.send_cmd(f'G1 X{self.x}')
+        elif 'y' in axis:
+            self.y += step
+            self.send_cmd(f'G1 Y{self.y}')
+        elif 'z' in axis:
+            self.z += step
+            self.send_cmd(f'G1 Z{self.z}')
+        else:
+            print('axis not yet implemented')
+    
+    def motors_off(self):
+        self.x = None
+        self.y = None
+        self.z = None
+        self.state = 'OFF'
+        return self.send_cmd('M18')
+    
+    def is_on(self):
+        return self.state == 'ON'
+    
+    def motors_on_set_zero(self):
+        self.send_cmd('G92 X0 Y0 Z0 U0') # declare this position as origin
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+        self.send_cmd('G21') # millimeters
+        self.send_cmd('G90') # absolute
+        self.state = 'ON'
+
+    def estop(self):
+        self.send_cmd('M112')
+        self.x = None
+        self.y = None
+        self.z = None
+        self.state = 'ESTOP'
+    
+    def restart(self):
+        self.send_cmd('M999')
+        self.sleep(8) # enough time to boot?? TODO: there is probably a smarter way to watch for the boot condition
+        return self.send_cmd('M115')
+
+    def set_poi(self, index):
+        if not self.is_on():
+            return
+        # index should be a number from 1 through MAX_POI, inclusive
+        if index > MAX_POI or index == 0:
+            return
+        logging.debug(f"POI {index} set to {self.x}, {self.y}, {self.z}")
+        self.poi[index - 1] = (self.x, self.y, self.z)
+
+    def recall_poi(self, index):
+        if not self.is_on():
+            return
+        # index should be a number from 1 through MAX_POI, inclusive
+        if index > MAX_POI or index == 0:
+            return
+        (self.x, self.y, self.z) = self.poi[index - 1]
+        logging.debug(f"Recalling to POI {index}: {self.x}, {self.y}, {self.z}")
+        return self.send_cmd(f'G1 X{self.x} Y{self.y} Z{self.z}')
+            
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.ser.is_open:
+            self.motors_off()
+            self.ser.close()
+            logging.debug("Serial port closed")
+
+class Midi:
+    def __init__(self, port):
+        self.port = port
+        try:
+            self.midi = mido.open_input(port)
+        except Exception as e:
+            logging.error(f"MIDI open error: {e}")
+            return None
+    
+    def __enter__(self):
+        return self
+    
+    def clear_events(self):
+        for msg in self.midi.iter_pending():
+            pass
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # I think this one cleans up after itself?
         pass
 
-    # set the current position as 0
-    ser_cmd(ser, 'G92 X0 Y0 Z0 U0')
-    ser_cmd(ser, 'M18') # disable all stepper motors
-    motor_state = 'IDLE'
+def loop(args, jubilee, midi, schema):
+    # clear any stray events in the queue
+    midi.clear_events()
+    if jubilee.motors_off():
+        # the command timed out
+        logging.warning("Machine not responsive, restarting Jubilee...")
+        if jubilee.restart():
+            logging.error("Couldn't connect to Jubilee")
+            return
 
     refvals = {}
     curvals = {}
     for name in schema.keys():
         refvals[name] = None
         curvals[name] = None
+    paused_axis = None
 
-    for msg in midi_in:
+    for msg in midi.midi:
         # hugely inefficient O(n) search on every iter, but "meh"
         # that's why we have Moore's law.
         valid = False
@@ -77,7 +178,8 @@ def loop(args, ser, midi_in, schema):
                 else:
                     continue
             if control_node in str(msg):
-                # slider case
+                valid = True
+                # sliders
                 if 'control=' in control_node:
                     # extract the value
                     for i in str(msg).strip().split(' '):
@@ -86,56 +188,88 @@ def loop(args, ser, midi_in, schema):
                             break
                     assert(control_value is not None)
                     curvals[name] = control_value
-                    valid = True
                     if refvals[name] is None:
                         refvals[name] = control_value # first time through, grab the current value as the reference
-
+                # buttons
                 elif 'note=' in control_node:
-                    if control_node in str(msg):
-                        if 'note_on' in str(msg):
-                            # the button was hit, that's all we care about
-                            if name == 'zero button':
-                                valid = True
-                                print("zero")
-                                for (name, val) in curvals.items():
-                                    refvals[name] = val
-                            elif name == 'ESTOP button':
-                                for (name, val) in curvals.items():
-                                    refvals[name] = val
-                                print("ESTOP hit, exiting")
-                                ser_cmd(ser, 'M112')
-                                time.sleep(5)
-                                exit(0)
+                    if 'note_on' in str(msg):
+                        # the button was hit
+                        if 'zero' in name:
+                            if 'x' in name:
+                                paused_axis = 'x'
+                            elif 'y' in name:
+                                paused_axis = 'y'
+                            elif 'z' in name:
+                                paused_axis = 'z'
+                            else:
+                                logging.error(f"Internal error, invalid button name {name} on {str(msg)}")
+                                exit(1)
+                            for name in refvals.keys():
+                                if paused_axis in name:
+                                    refvals[name] = None
+                        elif name == 'idle toggle button':
+                            if jubilee.is_on():
+                                logging.info("Motors are OFF")
+                                jubilee.motors_off()
+                            else:
+                                logging.info("Motors are ON and origin is set")
+                                jubilee.motors_on_set_zero()
+                        elif name == 'ESTOP button':
+                            for (name, val) in curvals.items():
+                                refvals[name] = val
+                            print("ESTOP hit, exiting")
+                            jubilee.estop()
+                            time.sleep(5)
+                            return
+                        elif 'set POI' in name:
+                            maybe_poi = re.findall(r'^set POI (\d)', name)
+                            if len(maybe_poi) == 1:
+                                jubilee.set_poi(int(maybe_poi[0]))
+                        elif 'recall POI' in name:
+                            maybe_poi = re.findall(r'^recall POI (\d)', name)
+                            if len(maybe_poi) == 1:
+                                jubilee.recall_poi(int(maybe_poi[0]))
+                        elif name == 'quit button':
+                            jubilee.motors_off()
+                            logging.info("Quitting controller...")
+                            return
+                    elif 'note_off' in str(msg):
+                        # the button was lifted
+                        if 'zero' in name:
+                            for name in refvals.keys():
+                                if paused_axis in name:
+                                    refvals[name] = None
+                            paused_axis = None
         
         # now update machine position based on values
         if valid:
             for (name, val) in curvals.items():
                 if refvals[name] is not None:
+                    if paused_axis is not None:
+                        if paused_axis in name:
+                            continue
+
                     delta = int(curvals[name]) - int(refvals[name])
                     refvals[name] = curvals[name] # reset ref
                     if delta > 0:
                         if 'coarse' in name:
-                            step = 1.0
+                            step = 0.2
                         else:
                             step = 0.05
                     elif delta < 0:
                         if 'coarse' in name:
-                            step = -1.0
+                            step = -0.2
                         else:
                             step = -0.05
                     else:
                         step = 0.0
                     if 'z' in name:
                         step = step / 5.0
-                    print(f"Delta of {delta} for {name}")
-                    if step_axis(ser, name, step):
-                        print("Motor command timeout!")
-                        # clear any stray events in the queue
-                        for msg in midi_in.iter_pending():
-                            pass
+                    logging.debug(f"Delta of {delta} for {name}")
 
-
-    # ser.write(b'G91\nG1 X1\n')
+                    if jubilee.step_axis(name, step):
+                        logging.warning("Motor command timeout!")
+                        midi.clear_events()
 
 def set_controls(midi_in):
     # Control schema layout
@@ -150,13 +284,14 @@ def set_controls(midi_in):
         'zero-x button' : None,
         'zero-y button' : None,
         'zero-z button' : None,
-        'idle button': None,
+        'idle toggle button': None,
         'set POI 1 button' : None,
         'set POI 2 button' : None,
         'set POI 3 button' : None,
         'recall POI 1 button' : None,
         'recall POI 2 button' : None,
         'recall POI 3 button' : None,
+        'quit button': None,
         'ESTOP button' : None,
     }
 
@@ -220,8 +355,16 @@ def main():
     parser.add_argument(
         "--set-controls", required=False, action="store_true", help="Set up MIDI controls"
     )
+    parser.add_argument(
+        "--loglevel", required=False, help="set logging level (INFO/DEBUG/WARNING/ERROR)", type=str, default="INFO",
+    )
     args = parser.parse_args()
+    numeric_level = getattr(logging, args.loglevel.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError('Invalid log level: %s' % args.loglevel)
+    logging.basicConfig(level=numeric_level)
 
+    # Automatically pick a MIDI device, or take one from command line if specified
     if args.midi_port is None:
         input_list = mido.get_input_names()
         midimix_name = None
@@ -230,45 +373,41 @@ def main():
                 midimix_name = i
                 break
         if midimix_name is None:
-            print("couldn't find Akai MIDI Mix device!")
+            logging.error("couldn't find Akai MIDI Mix device!")
             return
     else:
         midimix_name = args.midi_port
 
+    # Load or create a control schema
     if args.set_controls:
         try:
             with mido.open_input(midimix_name) as midi_in:
                 set_controls(midi_in)
-        except e:
-            print("Couldn't open MIDI device, --set-controls has failed.")
-            print(e)
+        except Exception as e:
+            logging.error("Couldn't open MIDI device, --set-controls has failed.")
+            logging.error(e)
             exit(1)
 
         # after setting controls, exit
-        print("Control setting finished. Please restart without --set-controls.")
+        logging.error("Control setting finished. Please restart without --set-controls.")
         exit(0)
     else:
         try:
             with open(SCHEMA_STORAGE, "r") as config:
                 schema = json.loads(config.read())
         except:
-            print("Couldn't load control configuration. Try running --set-controls to setup controls.")
+            logging.error("Couldn't load control configuration. Try running --set-controls to setup controls.")
             exit(1)
 
-    try:
-        ser = serial.Serial(args.duet_port, 115200, timeout=1.0)
-        print("Duet3D serial port opened")
+    # Launch the main loop
+    jubilee = Jubilee(args.duet_port)
+    midi = Midi(midimix_name)
+    logging.info("MIDI-to-Jubilee Controller Starting. Motors are IDLE.")
+    # wrap in 'with' so we can shut things down on exit if necessary
+    with jubilee as j:
+        with midi as m:
+            loop(args, j, m, schema)
 
-        with mido.open_input(midimix_name) as midi_in:
-            loop(args, ser, midi_in, schema)
-
-    except serial.SerialException as e:
-        print(f"Serial error: {e}")
-
-    finally:
-        if ser.is_open:
-            ser.close()
-            print("Serial port closed")
 
 if __name__ == "__main__":
     main()
