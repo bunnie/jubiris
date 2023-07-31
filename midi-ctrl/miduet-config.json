@@ -1,0 +1,21 @@
+{
+    "version": 2,
+    "x-coarse": "control=52",
+    "y-coarse": "control=56",
+    "z-coarse": "control=60",
+    "x-fine": "control=53",
+    "y-fine": "control=57",
+    "z-fine": "control=61",
+    "zero-x button": "note=18",
+    "zero-y button": "note=21",
+    "zero-z button": "note=24",
+    "idle toggle button": "note=27",
+    "set POI 1 button": "note=7",
+    "set POI 2 button": "note=10",
+    "set POI 3 button": "note=13",
+    "recall POI 1 button": "note=16",
+    "recall POI 2 button": "note=19",
+    "recall POI 3 button": "note=22",
+    "quit button": "note=4",
+    "ESTOP button": "note=26"
+}
