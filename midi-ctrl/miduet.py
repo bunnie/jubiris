@@ -20,6 +20,121 @@ import re
 SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 2
 MAX_POI = 3
+MIN_ANGLE = -100
+MAX_ANGLE = 100
+MAX_LIGHT = 4096
+MAX_PIEZO = 16383
+
+class Light:
+    def __init__(self, ports=[]):
+        self.port = None
+        for port in ports:
+            try:
+                ser = serial.Serial(port, 115200, timeout = 1.0)
+                logging.debug(f"Trying port {port} for light")
+                ser.write(bytes("?\n", 'utf-8'))
+                line = ''
+                while True:
+                    c = ser.read(1)
+                    if len(c) == 0:
+                        break
+                    line += c.decode('utf-8')
+                    if 'OK\n' in line:
+                        break
+                if "V1 LED" in line:
+                    logging.debug(f"Found V1 LED on {port}")
+                    self.ser = ser
+                    self.port = port
+                    break
+                else:
+                    ser.close()
+            except serial.SerialException as e:
+                logging.error(f"Serial error: {e}")
+                return None
+
+    def send_cmd(self, cmd, timeout=1.0):
+        cmd_bytes = bytes(cmd + '\n', 'utf-8')
+        logging.debug(str(cmd_bytes, 'utf-8'))
+        self.ser.write(cmd_bytes)
+        line = ''
+        timeout = True
+        while True:
+            c = self.ser.read(1)
+            if len(c) == 0:
+                break
+            line += c.decode('utf-8')
+            if 'OK\n' in line:
+                timeout = False
+                break
+
+        logging.debug(line)
+        return timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.ser.is_open:
+            self.send_cmd("I 0\n")
+            self.send_cmd("A 0\n")
+            self.ser.close()
+            logging.debug("Serial port closed")
+
+class Piezo:
+    def __init__(self, ports=[]):
+        self.port = None
+        for port in ports:
+            try:
+                ser = serial.Serial(port, 115200, timeout = 1.0)
+                logging.debug(f"Trying port {port} for piezo")
+                ser.write(bytes("?\n", 'utf-8'))
+                line = ''
+                while True:
+                    c = ser.read(1)
+                    if len(c) == 0:
+                        break
+                    line += c.decode('utf-8')
+                    if 'OK\n' in line:
+                        break
+                if "V1 PIEZO" in line:
+                    logging.debug(f"Found V1 PIEZO on {port}")
+                    self.ser = ser
+                    self.port = port
+                    self.send_cmd("E") # enable the HV driver
+                    break
+                else:
+                    ser.close()
+            except serial.SerialException as e:
+                logging.error(f"Serial error: {e}")
+                return None
+
+    def send_cmd(self, cmd, timeout=1.0):
+        cmd_bytes = bytes(cmd + '\n', 'utf-8')
+        logging.debug(str(cmd_bytes, 'utf-8'))
+        self.ser.write(cmd_bytes)
+        line = ''
+        timeout = True
+        while True:
+            c = self.ser.read(1)
+            if len(c) == 0:
+                break
+            line += c.decode('utf-8')
+            if 'OK\n' in line:
+                timeout = False
+                break
+
+        logging.debug(line)
+        return timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.ser.is_open:
+            self.send_cmd("A 0")
+            self.send_cmd("D")
+            self.ser.close()
+            logging.debug("Serial port closed")
 
 class Jubilee:
     def __init__(self, port):
@@ -149,7 +264,7 @@ class Midi:
         # I think this one cleans up after itself?
         pass
 
-def loop(args, jubilee, midi, schema):
+def loop(args, jubilee, midi, light, piezo, schema):
     # clear any stray events in the queue
     midi.clear_events()
     if jubilee.motors_off():
@@ -187,9 +302,19 @@ def loop(args, jubilee, midi, schema):
                             control_value = i.split('=')[1]
                             break
                     assert(control_value is not None)
-                    curvals[name] = control_value
-                    if refvals[name] is None:
-                        refvals[name] = control_value # first time through, grab the current value as the reference
+                    if name == "angle-light":
+                        angle = (float(control_value) * (MAX_ANGLE - MIN_ANGLE) / 127.0) + float(MIN_ANGLE)
+                        light.send_cmd(f"A {int(angle)}")
+                    elif name == "brightness-light":
+                        bright = float(control_value) * (MAX_LIGHT / 127.0)
+                        light.send_cmd(f"I {int(bright)}")
+                    elif name == "nudge-piezo":
+                        nudge = float(control_value) * (MAX_PIEZO / 127.0)
+                        piezo.send_cmd(f"A {int(nudge)}")
+                    else:
+                        curvals[name] = control_value
+                        if refvals[name] is None:
+                            refvals[name] = control_value # first time through, grab the current value as the reference
                 # buttons
                 elif 'note=' in control_node:
                     if 'note_on' in str(msg):
@@ -281,6 +406,9 @@ def set_controls(midi_in):
         'x-fine' : None,
         'y-fine' : None,
         'z-fine' : None,
+        "angle-light" : None,
+        "brightness-light" : None,
+        "nudge-piezo" : None,
         'zero-x button' : None,
         'zero-y button' : None,
         'zero-z button' : None,
@@ -363,6 +491,8 @@ def main():
     if not isinstance(numeric_level, int):
         raise ValueError('Invalid log level: %s' % args.loglevel)
     logging.basicConfig(level=numeric_level)
+    # TODO: turn this into a command line argument
+    iris_ports = ['/dev/ttyUSB0', '/dev/ttyUSB1']
 
     # Automatically pick a MIDI device, or take one from command line if specified
     if args.midi_port is None:
@@ -402,11 +532,15 @@ def main():
     # Launch the main loop
     jubilee = Jubilee(args.duet_port)
     midi = Midi(midimix_name)
+    light = Light(iris_ports)
+    piezo = Piezo(iris_ports)
     logging.info("MIDI-to-Jubilee Controller Starting. Motors are IDLE.")
     # wrap in 'with' so we can shut things down on exit if necessary
     with jubilee as j:
         with midi as m:
-            loop(args, j, m, schema)
+            with light as l:
+                with piezo as p:
+                    loop(args, j, m, l, p, schema)
 
 
 if __name__ == "__main__":
