@@ -83,14 +83,14 @@ M350 Z16 I1            ; 16x microstepping for Z axes. Use interpolation.
 
 ; Speed and Acceleration
 ;-------------------------------------------------------------------------------
-M201 X1500 Y1500       ; XY accelerations [mm/s^2]
+M201 X100 Y100       ; XY accelerations [mm/s^2]
                        ; XY accel can be increased up to 2500 or beyond later.
-M201 Z100              ; ZZZ Acceleration
+M201 Z50              ; ZZZ Acceleration
 M201 U800              ; U accelerations [deg/s^2]
 
 M203 X18000 Y18000 Z1600 U9000 ; Maximum axis speeds [mm/min]
                                ; If using a T8x2 leadscrew, change Z to 800.
-M566 X500 Y500 Z500 U50        ; Maximum jerk speeds [mm/min]
+M566 X100 Y100 Z100 U50        ; Maximum jerk speeds [mm/min]
 
 
 ; Endstops and Probes 

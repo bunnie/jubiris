@@ -19,7 +19,7 @@ M290 R0 S0              ; Reset baby stepping
 M561                    ; Disable any Mesh Bed Compensation
 
 G91                     ; Relative mode
-G1 H2 Z5 F5000          ; Lower the bed
+G1 H2 Z50 F5000          ; Lower the bed
 G90                     ; back to absolute positioning
 
 G90 G1 X150 Y130 F10000 ; Move to the center of the bed -20mm to not probe on
