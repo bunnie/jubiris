@@ -199,10 +199,10 @@ class Jubilee:
         return self.state == 'ON'
     
     def motors_on_set_zero(self):
-        self.send_cmd('G92 X0 Y0 Z0 U0') # declare this position as origin
+        self.send_cmd('G92 X0 Y0 Z10 U0') # declare this position as origin
         self.x = 0.0
         self.y = 0.0
-        self.z = 0.0
+        self.z = 10.0
         self.send_cmd('G21') # millimeters
         self.send_cmd('G90') # absolute
         self.state = 'ON'
@@ -234,7 +234,11 @@ class Jubilee:
         # index should be a number from 1 through MAX_POI, inclusive
         if index > MAX_POI or index == 0:
             return
-        (self.x, self.y, self.z) = self.poi[index - 1]
+        try:
+            (self.x, self.y, self.z) = self.poi[index - 1]
+        except ValueError as e:
+            logging.debug(f"POI {index} has not been set")
+            return
         logging.debug(f"Recalling to POI {index}: {self.x}, {self.y}, {self.z}")
         return self.send_cmd(f'G1 X{self.x} Y{self.y} Z{self.z}')
             
