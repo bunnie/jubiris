@@ -114,6 +114,9 @@ G31 K0 X0 Y0 Z-2        ; Set the limit switch as the "Control Point"
 M208 X-13.75:313.75 Y-44:341 Z0:300
 M208 U0:200            ; Set Elastic Lock (U axis) max rotation angle
 
+; ESTOP
+M950 J1 C"io2.in"
+M581 P1 T0 S1 R0
 
 M98  P"/sys/toffsets.g" ; Load tool offsets from the Control Point from ext file.
 M501                    ; Load saved parameters from config-override.g
