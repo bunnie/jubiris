@@ -17,13 +17,16 @@ import pprint
 import logging
 import re
 
+from cam import cam
+from threading import Thread
+
 SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 2
 MAX_POI = 3
 MIN_ANGLE = -100
 MAX_ANGLE = 100
 MAX_LIGHT = 4096
-MAX_PIEZO = 16383
+MAX_PIEZO = 8192 #16383
 
 class Light:
     def __init__(self, ports=[]):
@@ -548,5 +551,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
-    exit(0)
+    m = Thread(target=main, args=[])
+    m.start()
+
+    exit(cam())
