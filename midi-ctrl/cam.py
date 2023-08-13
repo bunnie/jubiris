@@ -25,7 +25,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(1024, 768)
+        self.setMinimumSize(1400, 1080)
         self.hcam = None
         self.timer = QTimer(self)
         self.imgWidth = 0
@@ -216,7 +216,6 @@ class MainWindow(QMainWindow):
         usmin, usmax, usdef = self.hcam.get_ExpoAGainRange()
         self.slider_expoGain.setRange(usmin, usmax)
         #self.slider_expoGain.setValue(usdef)
-        #self.handleExpoEvent()
         if self.cur.model.flag & toupcam.TOUPCAM_FLAG_MONO == 0:
             self.handleTempTintEvent()
         try:
@@ -236,6 +235,7 @@ class MainWindow(QMainWindow):
             # bAuto = self.hcam.get_AutoExpoEnable()
             self.cbox_auto.setChecked(False)
             self.btn_autoWB.setChecked(False)
+            self.handleExpoEvent()
 
             self.timer.start(1000)
         
@@ -291,19 +291,19 @@ class MainWindow(QMainWindow):
 
     def onBtnSnap(self):
         if self.hcam:
-            if 0 == self.cur.model.still:    # not support still image capture
-                if self.pData is not None:
-                    image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGB888)
-                    self.count += 1
-                    image.save("pyqt{}.jpg".format(self.count))
-            else:
-                menu = QMenu()
-                for i in range(0, self.cur.model.still):
-                    action = QAction("{}*{}".format(self.cur.model.res[i].width, self.cur.model.res[i].height), self)
-                    action.setData(i)
-                    menu.addAction(action)
-                action = menu.exec(self.mapToGlobal(self.btn_snap.pos()))
-                self.hcam.Snap(action.data())
+            # if 0 == self.cur.model.still:    # not support still image capture
+            #     if self.pData is not None:
+            #         image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGB888)
+            #         self.count += 1
+            #         image.save("pyqt{}.jpg".format(self.count))
+            # else:
+                # menu = QMenu()
+                # for i in range(0, self.cur.model.still):
+                #     action = QAction("{}*{}".format(self.cur.model.res[i].width, self.cur.model.res[i].height), self)
+                #     action.setData(i)
+                #     menu.addAction(action)
+                # action = menu.exec(self.mapToGlobal(self.btn_snap.pos()))
+            self.hcam.Snap(0)
 
     @staticmethod
     def eventCallBack(nEvent, self):
@@ -316,7 +316,7 @@ class MainWindow(QMainWindow):
             if toupcam.TOUPCAM_EVENT_IMAGE == nEvent:
                 self.handleImageEvent()
             elif toupcam.TOUPCAM_EVENT_EXPOSURE == nEvent:
-                #self.handleExpoEvent()
+                self.handleExpoEvent()
                 # manual exposure only
                 pass
             elif toupcam.TOUPCAM_EVENT_TEMPTINT == nEvent:
@@ -382,6 +382,13 @@ class MainWindow(QMainWindow):
         self.lbl_tint.setText(str(nTint))
 
     def handleStillImageEvent(self):
+        curtime = self.hcam.get_ExpoTime()
+        curgain = self.hcam.get_ExpoAGain()
+        new_gain = 100
+        self.hcam.put_ExpoAGain(new_gain)
+        new_exp = int(curtime * (curgain / new_gain))
+        self.hcam.put_ExpoTime(new_exp)
+        logging.debug(f"Capture at gain={new_gain}, exp={new_exp}")
         info = toupcam.ToupcamFrameInfoV3()
         try:
             self.hcam.PullImageV3(None, 1, 24, 0, info) # peek
@@ -397,7 +404,13 @@ class MainWindow(QMainWindow):
                 else:
                     image = QImage(buf, info.width, info.height, QImage.Format_RGB888)
                     self.count += 1
-                    image.save("pyqt{}.jpg".format(self.count))
+                    # image.save("pyqt{}.png".format(self.count))
+                    image.save("pyqt{}.jpg".format(self.count), None, 90)
+
+                    self.hcam.put_ExpoAGain(curgain)
+                    self.hcam.put_ExpoTime(curtime)
+                    logging.debug(f"Revert gain={curgain}, exp={curtime}")
+
 
 def cam(cam_quit):
     app = QApplication(sys.argv)
