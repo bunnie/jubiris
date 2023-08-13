@@ -7,6 +7,9 @@
 #  - sudo ln -s /usr/lib/x86_64-linux-gnu/alsa-lib/ /usr/lib64/alsa-lib  # fixes a library path issue that might just be a problem with ubuntu 22.04
 # Duet3D serial:
 #  - python3 -m pip install pyserial
+# Image processing:
+#  - python3 -m pip install numpy opencv-python-headless qimage2ndarray
+# The headless version of opencv-python is needed because it bundles a Qt plugin that is the wrong version
 #
 # Helpful: https://docs.google.com/document/d/1zeRPklp_Mo_XzJZUKu2i-p1VgfBoUWF0JKZ5CzX8aB0/edit#heading=h.pb5rw66aumst
 # ^^^ "Unofficial Communications Protocol for Akai MidiMix controller"
@@ -30,6 +33,7 @@ MIN_ANGLE = -100
 MAX_ANGLE = 100
 MAX_LIGHT = 4096
 MAX_PIEZO = 8192 #16383
+MAX_GAMMA = 2.0
 
 cam_quit = Event()
 
@@ -288,6 +292,10 @@ class Midi:
         # I think this one cleans up after itself?
         pass
 
+class Gamma:
+    def __init__(self):
+        self.gamma = 1.0
+
 def quitter(jubilee, light, piezo, cam_quit):
     cam_quit.wait()
     jubilee.motors_off()
@@ -303,7 +311,7 @@ def all_leds_off(schema, midi):
                 note_id = int(control_node.split('=')[1])
                 midi.set_led_state(note_id, False)
 
-def loop(args, jubilee, midi, light, piezo, schema):
+def loop(args, jubilee, midi, light, piezo, gamma, schema):
     # clear any stray events in the queue
     midi.clear_events()
     if jubilee.motors_off():
@@ -323,6 +331,8 @@ def loop(args, jubilee, midi, light, piezo, schema):
     light.send_cmd(f"I {int(MAX_LIGHT / 5)}")
 
     all_leds_off(schema, midi)
+    gamma_enabled = False
+    last_gamma = 1.0
     
     #for msg in midi.midi:
     while True:
@@ -361,6 +371,12 @@ def loop(args, jubilee, midi, light, piezo, schema):
                     elif name == "nudge-piezo":
                         nudge = float(control_value) * (MAX_PIEZO / 127.0)
                         piezo.send_cmd(f"A {int(nudge)}")
+                    elif name == "gamma":
+                        last_gamma = (float(control_value) / 127.0) * MAX_GAMMA
+                        if gamma_enabled:
+                            gamma.gamma = last_gamma 
+                        else:
+                            gamma.gamma = 1.0
                     else:
                         curvals[name] = control_value
                         if refvals[name] is None:
@@ -416,6 +432,15 @@ def loop(args, jubilee, midi, light, piezo, schema):
                             logging.info("Quitting controller...")
                             cam_quit.set()
                             return
+                        elif name == 'gamma button':
+                            if gamma_enabled:
+                                midi.set_led_state(note_id, False)
+                                gamma_enabled = False
+                                gamma.gamma = 1.0
+                            else:
+                                midi.set_led_state(note_id, True)
+                                gamma_enabled = True
+                                gamma.gamma = last_gamma
                     elif 'note_off' in str(msg):
                         # the button was lifted
                         if 'zero' in name:
@@ -464,6 +489,7 @@ def set_controls(midi_in):
         'x-fine' : None,
         'y-fine' : None,
         'z-fine' : None,
+        'gamma' : None,
         "angle-light" : None,
         "brightness-light" : None,
         "nudge-piezo" : None,
@@ -549,8 +575,9 @@ def main():
     )
     args = parser.parse_args()
 
+    gamma = Gamma()
     if not args.no_cam:
-        c = Thread(target=cam, args=[cam_quit])
+        c = Thread(target=cam, args=[cam_quit, gamma])
         c.start()
 
     numeric_level = getattr(logging, args.loglevel.upper(), None)
@@ -614,7 +641,7 @@ def main():
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
                     q.start()
                     l = Thread(target=loop, args=[
-                        args, j, m, l, p, schema
+                        args, j, m, l, p, gamma, schema
                     ])
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion

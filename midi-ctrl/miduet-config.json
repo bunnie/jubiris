@@ -6,6 +6,8 @@
     "x-fine": "control=53",
     "y-fine": "control=57",
     "z-fine": "control=61",
+    "gamma": "control=27",
+    "gamma button": "note=9",
     "angle-light": "control=49",
     "brightness-light": "control=31",
     "nudge-piezo": "control=62",

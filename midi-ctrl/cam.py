@@ -3,6 +3,19 @@ from PyQt5.QtCore import pyqtSignal, pyqtSlot, QTimer, QSignalBlocker, Qt, QRect
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtWidgets import QLabel, QApplication, QWidget, QDesktopWidget, QCheckBox, QMessageBox, QMainWindow, QPushButton, QComboBox, QSlider, QGroupBox, QGridLayout, QBoxLayout, QHBoxLayout, QVBoxLayout, QMenu, QAction
 
+import numpy as np
+import cv2
+import qimage2ndarray
+
+def adjust_gamma(image, gamma=1.0):
+	# build a lookup table mapping the pixel values [0, 255] to
+	# their adjusted gamma values
+	invGamma = 1.0 / gamma
+	table = np.array([((i / 255.0) ** invGamma) * 255
+		for i in np.arange(0, 256)]).astype("uint8")
+	# apply gamma correction using the lookup table
+	return cv2.LUT(image, table)
+
 class MainWindow(QMainWindow):
     evtCallback = pyqtSignal(int)
 
@@ -209,7 +222,7 @@ class MainWindow(QMainWindow):
             self.lbl_tint.setText(str(value))
 
     def startCamera(self):
-        self.pData = bytes(toupcam.TDIBWIDTHBYTES(self.imgWidth * 24) * self.imgHeight)
+        self.pData = bytes(toupcam.TDIBWIDTHBYTES(self.imgWidth * 32) * self.imgHeight)
         uimin, uimax, uidef = self.hcam.get_ExpTimeRange()
         self.slider_expoTime.setRange(uimin, uimax)
         #self.slider_expoTime.setValue(uidef)
@@ -332,26 +345,47 @@ class MainWindow(QMainWindow):
 
     def handleImageEvent(self):
         try:
-            self.hcam.PullImageV3(self.pData, 0, 24, 0, None)
+            self.hcam.PullImageV3(self.pData, 0, 32, 0, None)
         except toupcam.HRESULTException:
             pass
         else:
-            image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGB888)
-            # extract bounds from the enclosing V-box
-            video_bounds = self.v_video.geometry()
-            target_width = video_bounds.width()
-            target_height = video_bounds.height() // 2
-            # scale, preserving aspect ratio
-            newimage = image.scaled(target_width, target_height, Qt.KeepAspectRatio, Qt.FastTransformation)
-            self.lbl_video.setPixmap(QPixmap.fromImage(newimage))
+            image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGBX8888)
 
-            # extract a full-res preview image of the centroid
+            # extract bounds of the original image (before OpenCV processing)
             qr = image.rect()
             assert(qr.width() > 1920) # just check that we're in the higher resolution mode
+            # extract bounds from the enclosing V-box
+            video_bounds = self.v_video.geometry()
+            # cache video bounds because for some reason Qt sets it to 0 sometimes??
+            if video_bounds.width() != 0:
+                self.cached_bounds = video_bounds
+            else:
+                video_bounds = self.cached_bounds
+            target_width = video_bounds.width()
+            target_height = video_bounds.height() // 2
+
+            # scale, preserving aspect ratio
+            newimage = image.scaled(target_width, target_height, Qt.KeepAspectRatio, Qt.FastTransformation)
+            newimage_bounds = newimage.rect()
+            # newimage = image.scaledToHeight(target_height, Qt.FastTransformation)
+
+            # gamma adjust - run this on the down-scaled image, our CPU is not fast enough to handle 4K
+            if self.gamma.gamma == 1.0:
+                # bypass computations if it's 1.0
+                self.lbl_video.setPixmap(QPixmap.fromImage(newimage))
+            else:
+                gammaimage = qimage2ndarray.array2qimage(
+                    adjust_gamma(qimage2ndarray.rgb_view(newimage), self.gamma.gamma))
+                self.lbl_video.setPixmap(QPixmap.fromImage(
+                    gammaimage.copy(QRect(0, 0, newimage_bounds.width(), newimage_bounds.height()))
+                ))
+
+            # extract a full-res preview image of the centroid
             w = qr.width()
             h = qr.height()
             dest_w = self.lbl_fullres.width()
             dest_h = self.lbl_fullres.height()
+
             # handle case of screen res higher than source image
             if dest_w > w:
                 dest_w = w
@@ -359,7 +393,15 @@ class MainWindow(QMainWindow):
                 dest_h = h
             crop_rect = QRect(w//2 - dest_w//2, h//2 - dest_h//2, w//2 + dest_w//2, h//2 + dest_h//2)
             centerimage = image.copy(crop_rect)
-            self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
+            centerimage_rect = centerimage.rect()
+            if self.gamma.gamma == 1.0:
+                self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
+            else:
+                gamma_centerimage = qimage2ndarray.array2qimage(
+                    adjust_gamma(qimage2ndarray.rgb_view(centerimage), self.gamma.gamma))
+                self.lbl_fullres.setPixmap(QPixmap.fromImage(
+                    gamma_centerimage.copy(QRect(0, 0, centerimage_rect.width(), centerimage_rect.height()))
+                    ))
 
     def handleExpoEvent(self):
         return
@@ -391,31 +433,38 @@ class MainWindow(QMainWindow):
         logging.debug(f"Capture at gain={new_gain}, exp={new_exp}")
         info = toupcam.ToupcamFrameInfoV3()
         try:
-            self.hcam.PullImageV3(None, 1, 24, 0, info) # peek
+            self.hcam.PullImageV3(None, 1, 32, 0, info) # peek
         except toupcam.HRESULTException:
             pass
         else:
             if info.width > 0 and info.height > 0:
-                buf = bytes(toupcam.TDIBWIDTHBYTES(info.width * 24) * info.height)
+                buf = bytes(toupcam.TDIBWIDTHBYTES(info.width * 32) * info.height)
                 try:
-                    self.hcam.PullImageV3(buf, 1, 24, 0, info)
+                    self.hcam.PullImageV3(buf, 1, 32, 0, info)
                 except toupcam.HRESULTException:
                     pass
                 else:
-                    image = QImage(buf, info.width, info.height, QImage.Format_RGB888)
+                    image = QImage(buf, info.width, info.height, QImage.Format_RGBX8888)
+
                     self.count += 1
                     # image.save("pyqt{}.png".format(self.count))
                     image.save("pyqt{}.jpg".format(self.count), None, 90)
+
+                    if self.gamma.gamma != 1.0:
+                        gamma_image = qimage2ndarray.array2qimage(
+                            adjust_gamma(qimage2ndarray.rgb_view(image), self.gamma.gamma))
+                        gamma_image.save("pyqt-gamma{}.jpg".format(self.count), None, 90)
 
                     self.hcam.put_ExpoAGain(curgain)
                     self.hcam.put_ExpoTime(curtime)
                     logging.debug(f"Revert gain={curgain}, exp={curtime}")
 
 
-def cam(cam_quit):
+def cam(cam_quit, gamma):
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()
+    w.gamma = gamma
     # auto-open the camera on boot
     w.btn_open.click()
     ret = app.exec_()
