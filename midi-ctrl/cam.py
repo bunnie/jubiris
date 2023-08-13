@@ -97,29 +97,25 @@ class MainWindow(QMainWindow):
         self.btn_snap.setEnabled(False)
         self.btn_snap.clicked.connect(self.onBtnSnap)
 
-        vlyt_ctrl = QVBoxLayout()
-        vlyt_ctrl.addWidget(gbox_res)
-        vlyt_ctrl.addWidget(gbox_exp)
-        vlyt_ctrl.addWidget(gbox_wb)
-        vlyt_ctrl.addWidget(self.btn_open)
-        vlyt_ctrl.addWidget(self.btn_snap)
-        vlyt_ctrl.addStretch()
-        wg_ctrl = QWidget()
-        wg_ctrl.setLayout(vlyt_ctrl)
-
         self.lbl_frame = QLabel()
+
+        hlyt_ctrl = QHBoxLayout()
+        hlyt_ctrl.addWidget(gbox_res)
+        hlyt_ctrl.addWidget(gbox_exp)
+        hlyt_ctrl.addWidget(gbox_wb)
+        hlyt_ctrl.addWidget(self.btn_open)
+        hlyt_ctrl.addWidget(self.btn_snap)
+        hlyt_ctrl.addStretch()
+        wg_ctrl = QWidget()
+        wg_ctrl.setLayout(hlyt_ctrl)
+
         self.lbl_video = QLabel()
-        vlyt_show = QVBoxLayout()
-        vlyt_show.addWidget(self.lbl_video, 1)
-        vlyt_show.addWidget(self.lbl_frame)
-        wg_show = QWidget()
-        wg_show.setLayout(vlyt_show)
 
         grid_main = QGridLayout()
-        grid_main.setColumnStretch(0, 1)
-        grid_main.setColumnStretch(1, 4)
-        grid_main.addWidget(wg_ctrl)
-        grid_main.addWidget(wg_show)
+        grid_main.setRowStretch(0, 10) # video is on row 0, have it try to be as big as possible
+        grid_main.addWidget(self.lbl_video)
+        grid_main.addWidget(self.lbl_frame) # optional?
+        grid_main.addWidget(wg_ctrl, 2, 0)
         w_main = QWidget()
         w_main.setLayout(grid_main)
         self.setCentralWidget(w_main)
@@ -376,5 +372,5 @@ def cam(cam_quit):
     w.btn_open.click()
     ret = app.exec_()
     cam_quit.set()
-    logging.info("UI closed, quit Event set")
+    logging.debug("UI closed, quit Event set")
     return ret
