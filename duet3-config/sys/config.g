@@ -118,5 +118,8 @@ M208 U0:200            ; Set Elastic Lock (U axis) max rotation angle
 M950 J1 C"io2.in"
 M581 P1 T0 S1 R0
 
+; Idle motors after a brief peried of inactivity to quite down PWM modulation affecting focus
+M84 S1
+
 M98  P"/sys/toffsets.g" ; Load tool offsets from the Control Point from ext file.
 M501                    ; Load saved parameters from config-override.g
