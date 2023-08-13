@@ -36,13 +36,13 @@ class MainWindow(QMainWindow):
         self.tint = toupcam.TOUPCAM_TINT_DEF
         self.count = 0
 
-        gbox_res = QGroupBox("Resolution")
-        self.cmb_res = QComboBox()
-        self.cmb_res.setEnabled(False)
-        vlyt_res = QVBoxLayout()
-        vlyt_res.addWidget(self.cmb_res)
-        gbox_res.setLayout(vlyt_res)
-        self.cmb_res.currentIndexChanged.connect(self.onResolutionChanged)
+        #gbox_res = QGroupBox("Resolution")
+        #self.cmb_res = QComboBox()
+        #self.cmb_res.setEnabled(False)
+        #vlyt_res = QVBoxLayout()
+        #vlyt_res.addWidget(self.cmb_res)
+        #gbox_res.setLayout(vlyt_res)
+        #self.cmb_res.currentIndexChanged.connect(self.onResolutionChanged)
 
         gbox_exp = QGroupBox("Exposure")
         self.cbox_auto = QCheckBox()
@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         self.lbl_frame = QLabel()
 
         hlyt_ctrl = QHBoxLayout()
-        hlyt_ctrl.addWidget(gbox_res)
+        #hlyt_ctrl.addWidget(gbox_res)
         hlyt_ctrl.addWidget(gbox_exp)
         hlyt_ctrl.addWidget(gbox_wb)
         hlyt_ctrl.addWidget(self.btn_open)
@@ -144,8 +144,8 @@ class MainWindow(QMainWindow):
         self.slider_temp.setEnabled(False)
         self.slider_tint.setEnabled(False)
         self.btn_snap.setEnabled(False)
-        self.cmb_res.setEnabled(False)
-        self.cmb_res.clear()
+        #self.cmb_res.setEnabled(False)
+        #self.cmb_res.clear()
 
     def closeEvent(self, event):
         self.closeCamera()
@@ -204,11 +204,11 @@ class MainWindow(QMainWindow):
         self.pData = bytes(toupcam.TDIBWIDTHBYTES(self.imgWidth * 24) * self.imgHeight)
         uimin, uimax, uidef = self.hcam.get_ExpTimeRange()
         self.slider_expoTime.setRange(uimin, uimax)
-        self.slider_expoTime.setValue(uidef)
+        #self.slider_expoTime.setValue(uidef)
         usmin, usmax, usdef = self.hcam.get_ExpoAGainRange()
         self.slider_expoGain.setRange(usmin, usmax)
-        self.slider_expoGain.setValue(usdef)
-        self.handleExpoEvent()
+        #self.slider_expoGain.setValue(usdef)
+        #self.handleExpoEvent()
         if self.cur.model.flag & toupcam.TOUPCAM_FLAG_MONO == 0:
             self.handleTempTintEvent()
         try:
@@ -217,17 +217,11 @@ class MainWindow(QMainWindow):
             self.closeCamera()
             QMessageBox.warning(self, "Warning", "Failed to start camera.")
         else:
-            self.cmb_res.setEnabled(True)
+            #self.cmb_res.setEnabled(True)
             self.cbox_auto.setEnabled(True)
             self.btn_autoWB.setEnabled(True)
             self.slider_temp.setEnabled(True)
             self.slider_tint.setEnabled(True)
-
-            # set some defaults
-            self.slider_temp.setValue(6325)
-            self.slider_tint.setValue(1907)
-            self.slider_expoGain.setValue(200)
-            self.slider_expoTime.setValue(200000)
 
             self.btn_open.setText("Quit")
             self.btn_snap.setEnabled(True)
@@ -236,22 +230,34 @@ class MainWindow(QMainWindow):
             self.btn_autoWB.setChecked(False)
 
             self.timer.start(1000)
-
+        
     def openCamera(self):
         self.hcam = toupcam.Toupcam.Open(self.cur.id)
         if self.hcam:
             self.res = self.hcam.get_eSize()
             self.imgWidth = self.cur.model.res[self.res].width
             self.imgHeight = self.cur.model.res[self.res].height
-            with QSignalBlocker(self.cmb_res):
-                self.cmb_res.clear()
-                for i in range(0, self.cur.model.preview):
-                    self.cmb_res.addItem("{}*{}".format(self.cur.model.res[i].width, self.cur.model.res[i].height))
-                self.cmb_res.setCurrentIndex(self.res)
-                self.cmb_res.setEnabled(True)
+            # with QSignalBlocker(self.cmb_res):
+            #     self.cmb_res.clear()
+            #     for i in range(0, self.cur.model.preview):
+            #         self.cmb_res.addItem("{}*{}".format(self.cur.model.res[i].width, self.cur.model.res[i].height))
+            #     self.cmb_res.setCurrentIndex(self.res)
+            #     self.cmb_res.setEnabled(True)
             self.hcam.put_Option(toupcam.TOUPCAM_OPTION_BYTEORDER, 0) #Qimage use RGB byte order
-            self.hcam.put_AutoExpoEnable(1)
+            self.hcam.put_AutoExpoEnable(0)
             self.startCamera()
+
+            # set some defaults
+            INIT_EXPO_TIME=160_000
+            INIT_EXPO_GAIN=300
+            INIT_TEMP=6325
+            INIT_TINT=1907
+            self.slider_temp.setValue(INIT_TEMP)
+            self.slider_tint.setValue(INIT_TINT)
+            self.slider_expoGain.setValue(INIT_EXPO_GAIN)
+            self.slider_expoTime.setValue(INIT_EXPO_TIME)
+            self.handleExpoEvent()
+            self.handleTempTintEvent()
 
     def onBtnOpen(self):
         if self.hcam:
