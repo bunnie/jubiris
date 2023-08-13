@@ -27,5 +27,13 @@ if midimix_name is None:
     exit(1)
 
 with mido.open_input(midimix_name) as inport:
-    for msg in inport:
-        print(msg)
+    with mido.open_output(midimix_name) as outport:
+        for msg in inport:
+            print(msg)
+            elems = str(msg).split(' ')
+            for e in elems:
+                if 'note=' in e:
+                    n = int(e.split('=')[1])
+                    m = mido.Message('note_on', channel=0, note=n, velocity=0)
+                    outport.send(m)
+

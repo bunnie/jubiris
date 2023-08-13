@@ -7,6 +7,9 @@
 #  - sudo ln -s /usr/lib/x86_64-linux-gnu/alsa-lib/ /usr/lib64/alsa-lib  # fixes a library path issue that might just be a problem with ubuntu 22.04
 # Duet3D serial:
 #  - python3 -m pip install pyserial
+#
+# Helpful: https://docs.google.com/document/d/1zeRPklp_Mo_XzJZUKu2i-p1VgfBoUWF0JKZ5CzX8aB0/edit#heading=h.pb5rw66aumst
+# ^^^ "Unofficial Communications Protocol for Akai MidiMix controller"
 
 import argparse
 import serial
@@ -260,6 +263,7 @@ class Midi:
         self.port = port
         try:
             self.midi = mido.open_input(port)
+            self.midi_out = mido.open_output(port)
         except Exception as e:
             logging.error(f"MIDI open error: {e}")
             return None
@@ -270,6 +274,15 @@ class Midi:
     def clear_events(self):
         for msg in self.midi.iter_pending():
             pass
+    
+    def set_led_state(self, note, state):
+        if state:
+            v = 127
+        else:
+            v = 0
+        logging.debug(f"setting led {note}, {state}")
+        m = mido.Message('note_on', channel=0, note=note, velocity=v)
+        self.midi_out.send(m)
 
     def __exit__(self, exc_type, exc_value, traceback):
         # I think this one cleans up after itself?
@@ -281,6 +294,14 @@ def quitter(jubilee, light, piezo, cam_quit):
     light.send_cmd("I 0")
     piezo.send_cmd("A 0")
     logging.info("Safe quit reached!")
+
+def all_leds_off(schema, midi):
+    # turn off all controller LEDs
+    for control_node in schema.values():
+        if type(control_node) is str:
+            if 'note=' in control_node:
+                note_id = int(control_node.split('=')[1])
+                midi.set_led_state(note_id, False)
 
 def loop(args, jubilee, midi, light, piezo, schema):
     # clear any stray events in the queue
@@ -301,6 +322,8 @@ def loop(args, jubilee, midi, light, piezo, schema):
     # turn on a low illumination so the camera doesn't seem "broken"
     light.send_cmd(f"I {int(MAX_LIGHT / 5)}")
 
+    all_leds_off(schema, midi)
+    
     #for msg in midi.midi:
     while True:
         if cam_quit.is_set():
@@ -344,6 +367,7 @@ def loop(args, jubilee, midi, light, piezo, schema):
                             refvals[name] = control_value # first time through, grab the current value as the reference
                 # buttons
                 elif 'note=' in control_node:
+                    note_id = int(control_node.split('=')[1])
                     if 'note_on' in str(msg):
                         # the button was hit
                         if 'zero' in name:
@@ -362,14 +386,17 @@ def loop(args, jubilee, midi, light, piezo, schema):
                         elif name == 'idle toggle button':
                             if jubilee.is_on():
                                 logging.info("Motors are OFF")
+                                midi.set_led_state(note_id, False)
                                 jubilee.motors_off()
                             else:
                                 logging.info("Motors are ON and origin is set")
+                                midi.set_led_state(note_id, True)
                                 jubilee.motors_on_set_zero()
                         elif name == 'ESTOP button':
                             for (name, val) in curvals.items():
                                 refvals[name] = val
                             print("ESTOP hit, exiting")
+                            all_leds_off(schema, midi)
                             jubilee.estop()
                             time.sleep(5)
                             cam_quit.set()
@@ -377,6 +404,7 @@ def loop(args, jubilee, midi, light, piezo, schema):
                         elif 'set POI' in name:
                             maybe_poi = re.findall(r'^set POI (\d)', name)
                             if len(maybe_poi) == 1:
+                                midi.set_led_state(note_id, True)
                                 jubilee.set_poi(int(maybe_poi[0]))
                         elif 'recall POI' in name:
                             maybe_poi = re.findall(r'^recall POI (\d)', name)
@@ -384,6 +412,7 @@ def loop(args, jubilee, midi, light, piezo, schema):
                                 jubilee.recall_poi(int(maybe_poi[0]))
                         elif name == 'quit button':
                             jubilee.motors_off()
+                            all_leds_off(schema, midi)
                             logging.info("Quitting controller...")
                             cam_quit.set()
                             return

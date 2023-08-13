@@ -12,7 +12,7 @@
     "zero-x button": "note=18",
     "zero-y button": "note=21",
     "zero-z button": "note=24",
-    "idle toggle button": "note=27",
+    "idle toggle button": "note=1",
     "set POI 1 button": "note=7",
     "set POI 2 button": "note=10",
     "set POI 3 button": "note=13",
