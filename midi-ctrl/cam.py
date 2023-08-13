@@ -1,5 +1,5 @@
 import sys, toupcam, logging
-from PyQt5.QtCore import pyqtSignal, pyqtSlot, QTimer, QSignalBlocker, Qt
+from PyQt5.QtCore import pyqtSignal, pyqtSlot, QTimer, QSignalBlocker, Qt, QRect
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtWidgets import QLabel, QApplication, QWidget, QDesktopWidget, QCheckBox, QMessageBox, QMainWindow, QPushButton, QComboBox, QSlider, QGroupBox, QGridLayout, QBoxLayout, QHBoxLayout, QVBoxLayout, QMenu, QAction
 
@@ -109,13 +109,21 @@ class MainWindow(QMainWindow):
         wg_ctrl = QWidget()
         wg_ctrl.setLayout(hlyt_ctrl)
 
+        # Place overview and preview in the same V-box
         self.lbl_video = QLabel()
+        self.lbl_fullres = QLabel()
+        v_video = QVBoxLayout()
+        v_video.addWidget(self.lbl_video)
+        v_video.addWidget(self.lbl_fullres)
+        v_widget = QWidget()
+        v_widget.setLayout(v_video)
+        self.v_video = v_video
 
         grid_main = QGridLayout()
         grid_main.setRowStretch(0, 10) # video is on row 0, have it try to be as big as possible
-        grid_main.addWidget(self.lbl_video)
-        grid_main.addWidget(self.lbl_frame) # optional?
-        grid_main.addWidget(wg_ctrl, 2, 0)
+        grid_main.addWidget(v_widget)
+        grid_main.addWidget(self.lbl_frame, 1, 0) # optional?
+        grid_main.addWidget(wg_ctrl, 3, 0)
         w_main = QWidget()
         w_main.setLayout(grid_main)
         self.setCentralWidget(w_main)
@@ -329,8 +337,29 @@ class MainWindow(QMainWindow):
             pass
         else:
             image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGB888)
-            newimage = image.scaled(self.lbl_video.width(), self.lbl_video.height(), Qt.KeepAspectRatio, Qt.FastTransformation)
+            # extract bounds from the enclosing V-box
+            video_bounds = self.v_video.geometry()
+            target_width = video_bounds.width()
+            target_height = video_bounds.height() // 2
+            # scale, preserving aspect ratio
+            newimage = image.scaled(target_width, target_height, Qt.KeepAspectRatio, Qt.FastTransformation)
             self.lbl_video.setPixmap(QPixmap.fromImage(newimage))
+
+            # extract a full-res preview image of the centroid
+            qr = image.rect()
+            assert(qr.width() > 1920) # just check that we're in the higher resolution mode
+            w = qr.width()
+            h = qr.height()
+            dest_w = self.lbl_fullres.width()
+            dest_h = self.lbl_fullres.height()
+            # handle case of screen res higher than source image
+            if dest_w > w:
+                dest_w = w
+            if dest_h > h:
+                dest_h = h
+            crop_rect = QRect(w//2 - dest_w//2, h//2 - dest_h//2, w//2 + dest_w//2, h//2 + dest_h//2)
+            centerimage = image.copy(crop_rect)
+            self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
 
     def handleExpoEvent(self):
         return
