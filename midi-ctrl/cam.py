@@ -1,4 +1,4 @@
-import sys, toupcam
+import sys, toupcam, logging
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, QTimer, QSignalBlocker, Qt
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtWidgets import QLabel, QApplication, QWidget, QDesktopWidget, QCheckBox, QMessageBox, QMainWindow, QPushButton, QComboBox, QSlider, QGroupBox, QGridLayout, QBoxLayout, QHBoxLayout, QVBoxLayout, QMenu, QAction
@@ -224,12 +224,21 @@ class MainWindow(QMainWindow):
             self.cmb_res.setEnabled(True)
             self.cbox_auto.setEnabled(True)
             self.btn_autoWB.setEnabled(True)
-            self.slider_temp.setEnabled(self.cur.model.flag & toupcam.TOUPCAM_FLAG_MONO == 0)
-            self.slider_tint.setEnabled(self.cur.model.flag & toupcam.TOUPCAM_FLAG_MONO == 0)
-            self.btn_open.setText("Close")
+            self.slider_temp.setEnabled(True)
+            self.slider_tint.setEnabled(True)
+
+            # set some defaults
+            self.slider_temp.setValue(6325)
+            self.slider_tint.setValue(1907)
+            self.slider_expoGain.setValue(200)
+            self.slider_expoTime.setValue(200000)
+
+            self.btn_open.setText("Quit")
             self.btn_snap.setEnabled(True)
-            bAuto = self.hcam.get_AutoExpoEnable()
-            self.cbox_auto.setChecked(1 == bAuto)
+            # bAuto = self.hcam.get_AutoExpoEnable()
+            self.cbox_auto.setChecked(False)
+            self.btn_autoWB.setChecked(False)
+
             self.timer.start(1000)
 
     def openCamera(self):
@@ -251,6 +260,7 @@ class MainWindow(QMainWindow):
     def onBtnOpen(self):
         if self.hcam:
             self.closeCamera()
+            self.close()
         else:
             arr = toupcam.Toupcam.EnumV2()
             if 0 == len(arr):
@@ -296,7 +306,9 @@ class MainWindow(QMainWindow):
             if toupcam.TOUPCAM_EVENT_IMAGE == nEvent:
                 self.handleImageEvent()
             elif toupcam.TOUPCAM_EVENT_EXPOSURE == nEvent:
-                self.handleExpoEvent()
+                #self.handleExpoEvent()
+                # manual exposure only
+                pass
             elif toupcam.TOUPCAM_EVENT_TEMPTINT == nEvent:
                 self.handleTempTintEvent()
             elif toupcam.TOUPCAM_EVENT_STILLIMAGE == nEvent:
@@ -319,6 +331,7 @@ class MainWindow(QMainWindow):
             self.lbl_video.setPixmap(QPixmap.fromImage(newimage))
 
     def handleExpoEvent(self):
+        return
         time = self.hcam.get_ExpoTime()
         gain = self.hcam.get_ExpoAGain()
         with QSignalBlocker(self.slider_expoTime):
@@ -355,8 +368,13 @@ class MainWindow(QMainWindow):
                     self.count += 1
                     image.save("pyqt{}.jpg".format(self.count))
 
-def cam():
+def cam(cam_quit):
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()
-    return app.exec_()
+    # auto-open the camera on boot
+    w.btn_open.click()
+    ret = app.exec_()
+    cam_quit.set()
+    logging.info("UI closed, quit Event set")
+    return ret

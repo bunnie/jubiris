@@ -18,7 +18,7 @@ import logging
 import re
 
 from cam import cam
-from threading import Thread
+from threading import Thread, Event
 
 SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 2
@@ -27,6 +27,8 @@ MIN_ANGLE = -100
 MAX_ANGLE = 100
 MAX_LIGHT = 4096
 MAX_PIEZO = 8192 #16383
+
+cam_quit = Event()
 
 class Light:
     def __init__(self, ports=[]):
@@ -271,6 +273,13 @@ class Midi:
         # I think this one cleans up after itself?
         pass
 
+def quitter(jubilee, light, piezo, cam_quit):
+    cam_quit.wait()
+    jubilee.motors_off()
+    light.send_cmd("I 0")
+    piezo.send_cmd("A 0")
+    logging.info("Safe quit reached!")
+
 def loop(args, jubilee, midi, light, piezo, schema):
     # clear any stray events in the queue
     midi.clear_events()
@@ -287,8 +296,17 @@ def loop(args, jubilee, midi, light, piezo, schema):
         refvals[name] = None
         curvals[name] = None
     paused_axis = None
+    # turn on a low illumination so the camera doesn't seem "broken"
+    light.send_cmd(f"I {int(MAX_LIGHT / 5)}")
 
-    for msg in midi.midi:
+    #for msg in midi.midi:
+    while True:
+        if cam_quit.is_set():
+            return
+        msg = midi.midi.poll()
+        if msg is None:
+            time.sleep(0) # yield our quantum
+            continue
         # hugely inefficient O(n) search on every iter, but "meh"
         # that's why we have Moore's law.
         valid = False
@@ -352,6 +370,7 @@ def loop(args, jubilee, midi, light, piezo, schema):
                             print("ESTOP hit, exiting")
                             jubilee.estop()
                             time.sleep(5)
+                            cam_quit.set()
                             return
                         elif 'set POI' in name:
                             maybe_poi = re.findall(r'^set POI (\d)', name)
@@ -364,6 +383,7 @@ def loop(args, jubilee, midi, light, piezo, schema):
                         elif name == 'quit button':
                             jubilee.motors_off()
                             logging.info("Quitting controller...")
+                            cam_quit.set()
                             return
                     elif 'note_off' in str(msg):
                         # the button was lifted
@@ -493,13 +513,21 @@ def main():
     parser.add_argument(
         "--loglevel", required=False, help="set logging level (INFO/DEBUG/WARNING/ERROR)", type=str, default="INFO",
     )
+    parser.add_argument(
+        "--no-cam", required=False, action="store_true", help="Do not start camera UI"
+    )
     args = parser.parse_args()
+
+    if not args.no_cam:
+        c = Thread(target=cam, args=[cam_quit])
+        c.start()
+
     numeric_level = getattr(logging, args.loglevel.upper(), None)
     if not isinstance(numeric_level, int):
         raise ValueError('Invalid log level: %s' % args.loglevel)
     logging.basicConfig(level=numeric_level)
     # TODO: turn this into a command line argument
-    iris_ports = ['/dev/ttyUSB0', '/dev/ttyUSB1']
+    iris_ports = ['/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2', '/dev/ttyUSB3']
 
     # Automatically pick a MIDI device, or take one from command line if specified
     if args.midi_port is None:
@@ -537,6 +565,10 @@ def main():
             exit(1)
 
     # Launch the main loop
+    # Remember: if the Jubilee does not respond on serial, try unplugging
+    # the USB cable and then power cycling the Jubilee, and then plugging
+    # the USB cable back in. There is a bug in the Duet3D firmware that
+    # locks up the USB port if it is plugged in while the main board comes up.
     jubilee = Jubilee(args.duet_port)
     midi = Midi(midimix_name)
     light = Light(iris_ports)
@@ -547,11 +579,16 @@ def main():
         with midi as m:
             with light as l:
                 with piezo as p:
-                    loop(args, j, m, l, p, schema)
-
+                    q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
+                    q.start()
+                    l = Thread(target=loop, args=[
+                        args, j, m, l, p, schema
+                    ])
+                    l.start()
+                    # when the quitter exits, everything has been brought down in an orderly fashion
+                    q.join()
+                    logging.info("Midi control thread reached quit")
 
 if __name__ == "__main__":
-    m = Thread(target=main, args=[])
-    m.start()
+    main()
 
-    exit(cam())
