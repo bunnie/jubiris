@@ -38,7 +38,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(1400, 1080)
+        self.setMinimumSize(1400, 1600)
         self.hcam = None
         self.timer = QTimer(self)
         self.imgWidth = 0
