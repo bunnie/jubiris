@@ -181,12 +181,14 @@ class Jubilee:
         if step == 0.0:
             return False
 
+        # NOTE AXIS SWAP - this is more intuitive based on the orientation
+        # of the machine relative to my seat.
         if 'x' in axis:
             self.x += step
-            self.send_cmd(f'G1 X{self.x}')
+            self.send_cmd(f'G1 Y{self.x}')
         elif 'y' in axis:
             self.y += step
-            self.send_cmd(f'G1 Y{self.y}')
+            self.send_cmd(f'G1 X{self.y}')
         elif 'z' in axis:
             self.z += step
             self.send_cmd(f'G1 Z{self.z}')
@@ -574,6 +576,7 @@ def main():
     light = Light(iris_ports)
     piezo = Piezo(iris_ports)
     logging.info("MIDI-to-Jubilee Controller Starting. Motors are IDLE.")
+    logging.info("---> Please press SEND ALL to initialize <---")
     # wrap in 'with' so we can shut things down on exit if necessary
     with jubilee as j:
         with midi as m:
