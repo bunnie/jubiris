@@ -587,7 +587,7 @@ def main():
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion
                     q.join()
-                    logging.info("Midi control thread reached quit")
+                    logging.debug("Midi control thread reached quit")
 
 if __name__ == "__main__":
     main()
