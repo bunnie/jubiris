@@ -436,6 +436,9 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
     all_leds_off(schema, midi)
     gamma_enabled = False
     last_gamma = 1.0
+    last_angle = None
+    last_intensity = None
+    last_piezo = None
     
     #for msg in midi.midi:
     while True:
