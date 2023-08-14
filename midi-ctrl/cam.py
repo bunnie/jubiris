@@ -433,7 +433,7 @@ class MainWindow(QMainWindow):
         curgain = self.hcam.get_ExpoAGain()
         new_gain = 100
         self.hcam.put_ExpoAGain(new_gain)
-        new_exp = int(curtime * (curgain / new_gain))
+        new_exp = int(2.0 * curtime * (curgain / new_gain))
         self.hcam.put_ExpoTime(new_exp)
         logging.debug(f"Capture at gain={new_gain}, exp={new_exp}")
         info = toupcam.ToupcamFrameInfoV3()
@@ -471,11 +471,15 @@ class MainWindow(QMainWindow):
                             np_array = np.frombuffer(buf, dtype=np.uint8)
                             np_array = np_array.reshape((info.height, info.width, 4))
                             grayscale = cv2.cvtColor(np_array, cv2.COLOR_RGBA2GRAY)
-                            fname = self.image_name.get_name() + '.png'
-                            cv2.imwrite(fname, grayscale, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+                            fname = self.image_name.name + '/' + self.image_name.get_name() + '.png'
+                            logging.info(f"Writing {fname}")
+                            cv2.imwrite(fname, grayscale, [cv2.IMWRITE_PNG_COMPRESSION, 5])
+                            logging.info("done")
+                            self.hcam.put_ExpoAGain(curgain)
+                            self.hcam.put_ExpoTime(curtime)
                         else:
                             logging.error("Image name was not fully initalized, cannot save!")
-                        self.auto_snap_done.set()
+                        self.single_snap_done.set()
 
 
 def snapper(w, image_name, auto_snap_event, auto_snap_done):
@@ -491,12 +495,12 @@ def snapper(w, image_name, auto_snap_event, auto_snap_done):
             rep = 1
         for i in range(rep):
             w.image_name.cur_rep = i
-            # TODO: pass an event to w, instead of calling directly...
-            w.handleStillImageEvent()
-            auto_snap_done.wait()
-            auto_snap_done.clear()
+            w.hcam.Snap(0)
+            w.single_snap_done.wait()
+            w.single_snap_done.clear()
             w.image_name.cur_rep = None
         w.image_name = None
+        auto_snap_done.set()
 
 
 def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done):
@@ -506,7 +510,7 @@ def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done):
     w.gamma = gamma
     # auto-open the camera on boot
     w.btn_open.click()
-    w.auto_snap_done = auto_snap_done
+    w.single_snap_done = Event()
 
     # Run a thread to forward/manage snapshotting events
     b = Thread(target=snapper, args=[w, image_name, auto_snap_event, auto_snap_done])

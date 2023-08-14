@@ -443,6 +443,7 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
     #for msg in midi.midi:
     while True:
         if cam_quit.is_set():
+            all_leds_off(schema, midi)
             return
         msg = midi.midi.poll()
         if msg is None:
@@ -524,11 +525,14 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             cam_quit.set()
                             return
                         elif 'set POI' in name:
+                            if not jubilee.is_on():
+                                logging.warning("Please turn Jubilee on before setting a POI")
+                                continue
                             maybe_poi = re.findall(r'^set POI (\d)', name)
                             if len(maybe_poi) == 1:
                                 midi.set_led_state(note_id, True)
                                 jubilee.set_poi(int(maybe_poi[0]), light.angle, light.intensity, piezo.code)
-                                logging.info(f"Set POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z + piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
+                                logging.info(f"Set POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
                         elif 'recall POI' in name:
                             maybe_poi = re.findall(r'^recall POI (\d)', name)
                             if len(maybe_poi) == 1:
@@ -542,7 +546,7 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                         light.set_intensity(l_i)
                                     if l_p is not None:
                                         piezo.set_code(l_p)
-                                    logging.info(f"Recall POI {poi_index}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z + piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
+                                    logging.info(f"Recall POI {poi_index}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
 
                         elif name == 'quit button':
                             jubilee.motors_off()
@@ -561,7 +565,7 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                 gamma.gamma = last_gamma
                         elif name == 'report position button':
                             try:
-                                logging.info(f"X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z + piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
+                                logging.info(f"X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
                             except:
                                 logging.info("Machine is IDLE or controls not synchronized")
                         elif name == 'automate button':
@@ -588,10 +592,11 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             # derive Z-plane equation
                             p = []
                             for i in range(3):
-                              p += [np.array((jubilee.poi[i].x, jubilee.poi[i].y, jubilee.poi[i].z + jubilee.poi[i].piezo  * PIEZO_UM_PER_LSB / 1000))]
+                              p += [np.array((jubilee.poi[i].x, jubilee.poi[i].y, jubilee.poi[i].z - jubilee.poi[i].piezo  * PIEZO_UM_PER_LSB / 1000))]
 
                             if np.array_equal(p[1], p[2]):
                                 p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+                                p[2][1] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
 
                             v1 = p[1] - p[0]
                             v2 = p[2] - p[0]
@@ -610,13 +615,23 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                 for y in y_path:
                                     # derive composite-z
                                     zp = -(a * x + b * y + d) / c
-                                    # get jubilee to 0.02mm below the target Z
-                                    Z_INCREMENT = 1/0.02
-                                    z = math.floor(zp * Z_INCREMENT) / Z_INCREMENT
-                                    # make up the rest with the piezo
-                                    p_lsb = ((zp - z) * 1000) / PIEZO_UM_PER_LSB
+
+                                    # Compute Z partition
+                                    if jubilee.z - zp > 0 and jubilee.z - zp < (PIEZO_MAX_CODE * PIEZO_UM_PER_LSB / 1000):
+                                        # see if we can get to zp without adjusting z at all
+                                        z = jubilee.z
+                                        p_lsb = ((z - zp) * 1000) / PIEZO_UM_PER_LSB
+                                        logging.info(f"p_lsb only: {z}, {p_lsb}")
+                                    else:
+                                        Z_INCREMENT = 1/0.02
+                                        z = math.ceil(zp * Z_INCREMENT) / Z_INCREMENT
+                                        # make up the rest with the piezo
+                                        p_lsb = ((z - zp) * 1000) / PIEZO_UM_PER_LSB
+                                        logging.info(f"z and p_lsb: {z}, {p_lsb}")
+
+                                    # check values
                                     if p_lsb > PIEZO_MAX_CODE:
-                                        logging.warning(f"Piezo vale out of bounds: {p_lsb}, aborting step")
+                                        logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
                                         continue
                                     if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
                                         logging.warning(f"Z value seems hazardous, aborting step: {z}")
@@ -633,10 +648,11 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                     image_name.x = jubilee.x
                                     image_name.y = jubilee.y
                                     image_name.z = jubilee.z
-                                    image_name.p = piezo.code,
-                                    image_name.i = light.intensity,
-                                    image_name.t = light.angle,
+                                    image_name.p = piezo.code
+                                    image_name.i = light.intensity
+                                    image_name.t = light.angle
                                     image_name.cur_rep = None
+                                    image_name.rep = args.reps
                                     # wait for system to settle
                                     logging.info(f"settling for {args.settling}s")
                                     time.sleep(args.settling)
