@@ -7,6 +7,9 @@ import numpy as np
 import cv2
 import qimage2ndarray
 
+from threading import Thread, Event
+from pathlib import Path
+
 def adjust_gamma(image, gamma=1.0):
 	# build a lookup table mapping the pixel values [0, 255] to
 	# their adjusted gamma values
@@ -39,6 +42,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(1400, 1600)
+        self.image_name = None
         self.hcam = None
         self.timer = QTimer(self)
         self.imgWidth = 0
@@ -316,7 +320,8 @@ class MainWindow(QMainWindow):
                 #     action.setData(i)
                 #     menu.addAction(action)
                 # action = menu.exec(self.mapToGlobal(self.btn_snap.pos()))
-            self.hcam.Snap(0)
+
+            self.hcam.Snap(0) # argument is the resolution of the snap
 
     @staticmethod
     def eventCallBack(nEvent, self):
@@ -444,29 +449,70 @@ class MainWindow(QMainWindow):
                 except toupcam.HRESULTException:
                     pass
                 else:
-                    image = QImage(buf, info.width, info.height, QImage.Format_RGBX8888)
+                    if self.image_name is None:
+                        image = QImage(buf, info.width, info.height, QImage.Format_RGBX8888)
 
-                    self.count += 1
-                    # image.save("pyqt{}.png".format(self.count))
-                    image.save("pyqt{}.jpg".format(self.count), None, 90)
+                        self.count += 1
+                        # image.save("pyqt{}.png".format(self.count))
+                        image.save("pyqt{}.jpg".format(self.count), None, 90)
 
-                    if self.gamma.gamma != 1.0:
-                        gamma_image = qimage2ndarray.array2qimage(
-                            adjust_gamma(qimage2ndarray.rgb_view(image), self.gamma.gamma))
-                        gamma_image.save("pyqt-gamma{}.jpg".format(self.count), None, 90)
+                        if self.gamma.gamma != 1.0:
+                            gamma_image = qimage2ndarray.array2qimage(
+                                adjust_gamma(qimage2ndarray.rgb_view(image), self.gamma.gamma))
+                            gamma_image.save("pyqt-gamma{}.jpg".format(self.count), None, 90)
 
-                    self.hcam.put_ExpoAGain(curgain)
-                    self.hcam.put_ExpoTime(curtime)
-                    logging.debug(f"Revert gain={curgain}, exp={curtime}")
+                        self.hcam.put_ExpoAGain(curgain)
+                        self.hcam.put_ExpoTime(curtime)
+                        logging.debug(f"Revert gain={curgain}, exp={curtime}")
+                    else:
+                        if self.image_name.is_init():
+                            # ensure that the target directory exists
+                            Path(self.image_name.name).mkdir(exist_ok=True)
+                            np_array = np.frombuffer(buf, dtype=np.uint8)
+                            np_array = np_array.reshape((info.height, info.width, 4))
+                            grayscale = cv2.cvtColor(np_array, cv2.COLOR_RGBA2GRAY)
+                            fname = self.image_name.get_name() + '.png'
+                            cv2.imwrite(fname, grayscale, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+                        else:
+                            logging.error("Image name was not fully initalized, cannot save!")
+                        self.auto_snap_done.set()
 
 
-def cam(cam_quit, gamma):
+def snapper(w, image_name, auto_snap_event, auto_snap_done):
+    while True:
+        auto_snap_event.wait()
+        auto_snap_event.clear()
+        if image_name.quit:
+            break
+        w.image_name = image_name
+        if image_name.rep is not None:
+            rep = int(image_name.rep)
+        else:
+            rep = 1
+        for i in range(rep):
+            w.image_name.cur_rep = i
+            # TODO: pass an event to w, instead of calling directly...
+            w.handleStillImageEvent()
+            auto_snap_done.wait()
+            auto_snap_done.clear()
+            w.image_name.cur_rep = None
+        w.image_name = None
+
+
+def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done):
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()
     w.gamma = gamma
     # auto-open the camera on boot
     w.btn_open.click()
+    w.auto_snap_done = auto_snap_done
+
+    # Run a thread to forward/manage snapshotting events
+    b = Thread(target=snapper, args=[w, image_name, auto_snap_event, auto_snap_done])
+    b.start()
+
+    # run the application. execution blocks at this line, until app quits
     ret = app.exec_()
     cam_quit.set()
     logging.debug("UI closed, quit Event set")

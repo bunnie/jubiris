@@ -25,6 +25,8 @@ import re
 
 from cam import cam
 from threading import Thread, Event
+import numpy as np
+import math
 
 SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 2
@@ -45,6 +47,8 @@ cam_quit = Event()
 class Light:
     def __init__(self, ports=[]):
         self.port = None
+        self.intensity = 0
+        self.angle = 0
         for port in ports:
             try:
                 ser = serial.Serial(port, 115200, timeout = 1.0)
@@ -86,6 +90,28 @@ class Light:
 
         logging.debug(line)
         return timeout
+    
+    def set_intensity(self, i):
+        i = int(i)
+        if i > MAX_LIGHT:
+            logging.warning(f"requested intensity too great {i}")
+            return
+        if i < 0:
+            logging.warning(f"requested intensity out of range {i}")
+            return
+        self.send_cmd(f"I {i}")
+        self.intensity = i
+
+    def set_angle(self, a):
+        a = int(a)
+        if a > MAX_ANGLE:
+            logging.warning(f"requested angle too great {a}")
+            return
+        if a < MIN_ANGLE:
+            logging.warning(f"requested angle too small {a}")
+            return
+        self.send_cmd(f"A {a}")
+        self.angle = a
 
     def __enter__(self):
         return self
@@ -93,13 +119,17 @@ class Light:
     def __exit__(self, exc_type, exc_value, traceback):
         if self.ser.is_open:
             self.send_cmd("I 0\n")
+            self.intensity = 0
             self.send_cmd("A 0\n")
+            self.angle = 0
             self.ser.close()
             logging.debug("Serial port closed")
 
 class Piezo:
     def __init__(self, ports=[]):
         self.port = None
+        self.code = 0
+        self.enabled = False
         for port in ports:
             try:
                 ser = serial.Serial(port, 115200, timeout = 1.0)
@@ -118,6 +148,7 @@ class Piezo:
                     self.ser = ser
                     self.port = port
                     self.send_cmd("E") # enable the HV driver
+                    self.enabled = True
                     break
                 else:
                     ser.close()
@@ -142,14 +173,30 @@ class Piezo:
 
         logging.debug(line)
         return timeout
-
+    
+    def set_code(self, a):
+        a = int(a)
+        if not self.enabled:
+            logging.warning(f"Piezo drivers not enabled")
+            return
+        if a < 0:
+            logging.warning(f"Invalid piezo value {a}")
+            return
+        if a > PIEZO_MAX_CODE:
+            logging.warning(f"Invalid piezo value {a}")
+            return
+        self.send_cmd(f"A {a}")
+        self.code = a
+    
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self.ser.is_open:
             self.send_cmd("A 0")
+            self.code = 0
             self.send_cmd("D")
+            self.enabled = False
             self.ser.close()
             logging.debug("Serial port closed")
 
@@ -170,7 +217,7 @@ class Jubilee:
             logging.debug("Duet3D serial port opened")
             self.ser = ser
             self.motors_off()
-            self.poi = [None] * MAX_POI # this is an array of Poi objects
+            self.poi = [None] * MAX_POI # this is an array of POI objects
         except serial.SerialException as e:
             logging.error(f"Serial error: {e}")
             return None
@@ -202,21 +249,30 @@ class Jubilee:
         if step == 0.0:
             return False
 
-        # NOTE AXIS SWAP - this is more intuitive based on the orientation
-        # of the machine relative to my seat.
-        # FIXME you must also change the axis order in recall_poi() -- this should probably be...made less brittle...
         if 'x' in axis:
             self.x += step
-            self.send_cmd(f'G1 Y{self.x:0.2f}')
         elif 'y' in axis:
             self.y += step
-            self.send_cmd(f'G1 X{self.y:0.2f}')
         elif 'z' in axis:
             self.z += step
-            self.send_cmd(f'G1 Z{self.z:0.2f}')
         else:
             print('axis not yet implemented')
+        return self.sync_to_mach()
     
+    def goto(self, xyz_tuple):
+        if not self.is_on():
+            return False # don't return an error, just silently fail
+        (x, y, z) = xyz_tuple
+        self.x = x
+        self.y = y
+        self.z = z
+        return self.sync_to_mach()
+    
+    # takes our self.x/y/z and sends it to the machine. Also handles any global axis swapping
+    def sync_to_mach(self):
+        # NOTE axis swap is implemented at sync_to_mach
+        return self.send_cmd(f'G1 Y{self.x:0.2f} X{self.y:0.2f} Z{self.z:0.2f}')
+
     def motors_off(self):
         self.x = None
         self.y = None
@@ -272,7 +328,7 @@ class Jubilee:
             logging.debug(f"POI {index} has not been set")
             return None
         logging.debug(f"Recalling to POI {index}: {self.x}, {self.y}, {self.z}")
-        self.send_cmd(f'G1 Y{self.x:0.2f} X{self.y:0.2f} Z{self.z:0.2f}')
+        self.sync_to_mach()
         return (poi.theta, poi.i, poi.piezo)
             
     def __exit__(self, exc_type, exc_value, traceback):
@@ -315,11 +371,39 @@ class Gamma:
     def __init__(self):
         self.gamma = 1.0
 
+# A class for shared state to name image frames. Protected by
+# the auto_snap_event and auto_snap_done Events. The object is
+# safe to change by the controller until an auto_snap_event is
+# triggered; after which, it must wait until auto_snap_done triggers
+# to update state.
+class ImageNamer:
+    def __init__(self):
+        self.name = None # base name
+        self.x = None  # jubilee x/y/z in mm
+        self.y = None
+        self.z = None
+        self.p = None  # raw piezo step value
+        self.i = None  # intensity of light
+        self.t = None  # theta of light
+        self.rep = None # repetitions of the same spot
+        self.cur_rep = None
+        self.quit = False # flag to indicate if we're exiting
+    def is_init(self):
+        return self.name is not None and self.x is not None and self.y is not None \
+        and self.z is not None and self.p is not None \
+        and self.i is not None and self.t is not None
+    def get_name(self):
+        if self.cur_rep is not None:
+            r = str(self.cur_rep)
+        else:
+            r = '1'
+        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{self.p}_i{self.i}_t{self.t}_r{r}'
+
 def quitter(jubilee, light, piezo, cam_quit):
     cam_quit.wait()
     jubilee.motors_off()
     light.send_cmd("I 0")
-    piezo.send_cmd("A 0")
+    piezo.set_code(0)
     logging.info("Safe quit reached!")
 
 def all_leds_off(schema, midi):
@@ -330,7 +414,7 @@ def all_leds_off(schema, midi):
                 note_id = int(control_node.split('=')[1])
                 midi.set_led_state(note_id, False)
 
-def loop(args, jubilee, midi, light, piezo, gamma, schema):
+def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, auto_snap_event, schema):
     # clear any stray events in the queue
     midi.clear_events()
     if jubilee.motors_off():
@@ -352,9 +436,6 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
     all_leds_off(schema, midi)
     gamma_enabled = False
     last_gamma = 1.0
-    last_angle = None
-    last_intensity = None
-    last_piezo = None
     
     #for msg in midi.midi:
     while True:
@@ -386,16 +467,13 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                     assert(control_value is not None)
                     if name == "angle-light":
                         angle = (float(control_value) * (MAX_ANGLE - MIN_ANGLE) / 127.0) + float(MIN_ANGLE)
-                        light.send_cmd(f"A {int(angle)}")
-                        last_angle = int(angle)
+                        light.set_angle(int(angle))
                     elif name == "brightness-light":
                         bright = float(control_value) * (MAX_LIGHT / 127.0)
-                        light.send_cmd(f"I {int(bright)}")
-                        last_intensity = int(bright)
+                        light.set_intensity(int(bright))
                     elif name == "nudge-piezo":
                         nudge = float(control_value) * (MAX_PIEZO / 127.0)
-                        piezo.send_cmd(f"A {int(nudge)}")
-                        last_piezo = int(nudge)
+                        piezo.set_code(int(nudge))
                     elif name == "gamma":
                         last_gamma = (float(control_value) / 127.0) * MAX_GAMMA
                         if gamma_enabled:
@@ -446,24 +524,22 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                             maybe_poi = re.findall(r'^set POI (\d)', name)
                             if len(maybe_poi) == 1:
                                 midi.set_led_state(note_id, True)
-                                jubilee.set_poi(int(maybe_poi[0]), last_angle, last_intensity, last_piezo)
-                                logging.info(f"Set POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {last_piezo}, Z': {(jubilee.z + last_piezo * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {last_intensity}, A: {last_angle}")
+                                jubilee.set_poi(int(maybe_poi[0]), light.angle, light.intensity, piezo.code)
+                                logging.info(f"Set POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z + piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
                         elif 'recall POI' in name:
                             maybe_poi = re.findall(r'^recall POI (\d)', name)
                             if len(maybe_poi) == 1:
-                                maybe_poi = jubilee.recall_poi(int(maybe_poi[0]))
+                                poi_index = int(maybe_poi[0])
+                                maybe_poi = jubilee.recall_poi(poi_index)
                                 if maybe_poi is not None:
                                     (l_t, l_i, l_p) = maybe_poi
                                     if l_t is not None:
-                                        light.send_cmd(f"A {l_t}")
-                                        last_angle = l_t # l_t is for "light_theta"
+                                        light.set_angle(l_t)
                                     if l_i is not None:
-                                        light.send_cmd(f"I {l_i}")
-                                        last_intensity = l_i
+                                        light.set_intensity(l_i)
                                     if l_p is not None:
-                                        piezo.send_cmd(f"A {l_p}")
-                                        last_piezo = l_p
-                                    logging.info(f"Recall POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {last_piezo}, Z': {(jubilee.z + last_piezo * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {last_intensity}, A: {last_angle}")
+                                        piezo.set_code(l_p)
+                                    logging.info(f"Recall POI {poi_index}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z + piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
 
                         elif name == 'quit button':
                             jubilee.motors_off()
@@ -482,9 +558,96 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                                 gamma.gamma = last_gamma
                         elif name == 'report position button':
                             try:
-                                logging.info(f"X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {last_piezo}, Z': {(jubilee.z + last_piezo * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {last_intensity}, A: {last_angle}")
+                                logging.info(f"X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z + piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
                             except:
                                 logging.info("Machine is IDLE or controls not synchronized")
+                        elif name == 'automate button':
+                            # check that the POIs have been set
+                            if jubilee.poi[0] is None or jubilee.poi[1] is None:
+                                logging.warning("POIs have not been set, can't automate!")
+                                continue
+                            if jubilee.poi[2] is None:
+                                # simplify edge cases by just duplicating to create our third POI
+                                jubilee.poi[2] = jubilee.poi[1]
+                            # plan the path of steps
+                            min_x = min([i.x for i in jubilee.poi])
+                            max_x = max([i.x for i in jubilee.poi])
+                            min_y = min([i.y for i in jubilee.poi])
+                            max_y = max([i.y for i in jubilee.poi])
+
+                            x_path = np.arange(min_x, max_x, args.stepsize)
+                            if len(x_path) == 0: # this happens if min == max
+                                x_path = [min_x]
+                            y_path = np.arange(min_y, max_y, args.stepsize)
+                            if len(y_path) == 0:
+                                y_path = [min_y]
+
+                            # derive Z-plane equation
+                            p = []
+                            for i in range(3):
+                              p += [np.array((jubilee.poi[i].x, jubilee.poi[i].y, jubilee.poi[i].z + jubilee.poi[i].piezo  * PIEZO_UM_PER_LSB / 1000))]
+
+                            if np.array_equal(p[1], p[2]):
+                                p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+
+                            v1 = p[1] - p[0]
+                            v2 = p[2] - p[0]
+                            normal_vector = np.cross(v1, v2)
+                            a, b, c = normal_vector
+                            d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
+
+                            # TODO: interpolate angle and light. For now, just use the setting at POI[0]
+                            light.set_intensity(jubilee.poi[0].i)
+                            light.set_angle(jubilee.poi[0].theta)
+
+                            logging.info(f"stepping x {x_path}")
+                            logging.info(f"stepping y {y_path}")
+
+                            for x in x_path:
+                                for y in y_path:
+                                    # derive composite-z
+                                    zp = -(a * x + b * y + d) / c
+                                    # get jubilee to 0.02mm below the target Z
+                                    Z_INCREMENT = 1/0.02
+                                    z = math.floor(zp * Z_INCREMENT) / Z_INCREMENT
+                                    # make up the rest with the piezo
+                                    p_lsb = ((zp - z) * 1000) / PIEZO_UM_PER_LSB
+                                    if p_lsb > PIEZO_MAX_CODE:
+                                        logging.warning(f"Piezo vale out of bounds: {p_lsb}, aborting step")
+                                        continue
+                                    if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
+                                        logging.warning(f"Z value seems hazardous, aborting step: {z}")
+                                        continue
+                                    if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
+                                        logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
+                                        continue
+
+                                    logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
+                                    jubilee.goto((x, y, z))
+                                    piezo.set_code(p_lsb)
+
+                                    # setup the image_name object
+                                    image_name.x = jubilee.x
+                                    image_name.y = jubilee.y
+                                    image_name.z = jubilee.z
+                                    image_name.p = piezo.code,
+                                    image_name.i = light.intensity,
+                                    image_name.t = light.angle,
+                                    image_name.cur_rep = None
+                                    # wait for system to settle
+                                    logging.info(f"settling for {args.settling}s")
+                                    time.sleep(args.settling)
+                                    # this should trigger the picture
+                                    logging.info(f"triggering photos")
+                                    auto_snap_event.set()
+                                    auto_snap_done.wait()
+                                    logging.info(f"got photo done event")
+                                    # reset the flags
+                                    auto_snap_event.clear()
+                                    auto_snap_done.clear()
+                            
+                            logging.info("Automation done!")
+
                     elif 'note_off' in str(msg):
                         # the button was lifted
                         if 'zero' in name:
@@ -617,11 +780,28 @@ def main():
     parser.add_argument(
         "--no-cam", required=False, action="store_true", help="Do not start camera UI"
     )
+    parser.add_argument(
+        "--name", required=False, type=str, default="unnamed_chip", help="Directory name for auto-image snaps"
+    )
+    parser.add_argument(
+        "--reps", required=False, type=int, default=1, help="Number of repetitions of shots of the current position"
+    )
+    parser.add_argument(
+        "--stepsize", required=False, type=float, default=0.1, help="Step size in mm for automation"
+    )
+    parser.add_argument(
+        "--settling", required=False, type=float, default=5.0, help="Settling time in seconds between steps"
+    )
     args = parser.parse_args()
 
     gamma = Gamma()
+    image_name = ImageNamer()
+    image_name.name = args.name
+    image_name.rep = args.reps
+    auto_snap_event = Event()
+    auto_snap_done = Event()
     if not args.no_cam:
-        c = Thread(target=cam, args=[cam_quit, gamma])
+        c = Thread(target=cam, args=[cam_quit, gamma, image_name, auto_snap_event, auto_snap_done])
         c.start()
 
     numeric_level = getattr(logging, args.loglevel.upper(), None)
@@ -685,11 +865,14 @@ def main():
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
                     q.start()
                     l = Thread(target=loop, args=[
-                        args, j, m, l, p, gamma, schema
+                        args, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema
                     ])
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion
                     q.join()
+                    # inform the snapper thread to quit
+                    image_name.quit = True
+                    auto_snap_event.set()
                     logging.debug("Midi control thread reached quit")
 
 if __name__ == "__main__":
