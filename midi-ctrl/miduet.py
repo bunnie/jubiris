@@ -447,13 +447,13 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                             if len(maybe_poi) == 1:
                                 midi.set_led_state(note_id, True)
                                 jubilee.set_poi(int(maybe_poi[0]), last_angle, last_intensity, last_piezo)
+                                logging.info(f"Set POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {last_piezo}, Z': {(jubilee.z + last_piezo * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {last_intensity}, A: {last_angle}")
                         elif 'recall POI' in name:
                             maybe_poi = re.findall(r'^recall POI (\d)', name)
                             if len(maybe_poi) == 1:
                                 maybe_poi = jubilee.recall_poi(int(maybe_poi[0]))
                                 if maybe_poi is not None:
                                     (l_t, l_i, l_p) = maybe_poi
-                                    logging.debug(f"Recalling poi {l_t} {l_i} {l_p}")
                                     if l_t is not None:
                                         light.send_cmd(f"A {l_t}")
                                         last_angle = l_t # l_t is for "light_theta"
@@ -463,6 +463,8 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                                     if l_p is not None:
                                         piezo.send_cmd(f"A {l_p}")
                                         last_piezo = l_p
+                                    logging.info(f"Recall POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {last_piezo}, Z': {(jubilee.z + last_piezo * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {last_intensity}, A: {last_angle}")
+
                         elif name == 'quit button':
                             jubilee.motors_off()
                             all_leds_off(schema, midi)
