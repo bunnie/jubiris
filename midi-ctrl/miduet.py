@@ -436,9 +436,6 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
     all_leds_off(schema, midi)
     gamma_enabled = False
     last_gamma = 1.0
-    last_angle = None
-    last_intensity = None
-    last_piezo = None
     
     #for msg in midi.midi:
     while True:
@@ -698,7 +695,7 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                     else:
                         step = 0.0
                     if 'z' in name:
-                        step = step / 5.0
+                        step = -(step / 5.0) # Z 0 is "up", make slider's direction correspond to stage direction
                     logging.debug(f"Delta of {delta} for {name}")
 
                     if jubilee.step_axis(name, step):
