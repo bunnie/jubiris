@@ -8,6 +8,7 @@
     "z-fine": "control=61",
     "gamma": "control=27",
     "gamma button": "note=9",
+    "report position button": "note=25",
     "angle-light": "control=49",
     "brightness-light": "control=31",
     "nudge-piezo": "control=62",

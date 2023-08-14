@@ -35,6 +35,11 @@ MAX_LIGHT = 4096
 MAX_PIEZO = 8192 #16383
 MAX_GAMMA = 2.0
 
+PIEZO_UM_PER_VOLT = 1.17 # estimated
+PIEZO_MAX_VOLT = 103.97
+PIEZO_MAX_CODE = 16383
+PIEZO_UM_PER_LSB = 0.007425
+
 cam_quit = Event()
 
 class Light:
@@ -148,6 +153,15 @@ class Piezo:
             self.ser.close()
             logging.debug("Serial port closed")
 
+class Poi:
+    def __init__(self, x, y, z, theta, i, piezo):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.theta = theta
+        self.i = i
+        self.piezo = piezo
+
 class Jubilee:
     def __init__(self, port):
         self.port = port
@@ -156,7 +170,7 @@ class Jubilee:
             logging.debug("Duet3D serial port opened")
             self.ser = ser
             self.motors_off()
-            self.poi = [()] * MAX_POI # this will be a list of x/y/z tuples that set points of interest
+            self.poi = [None] * MAX_POI # this is an array of Poi objects
         except serial.SerialException as e:
             logging.error(f"Serial error: {e}")
             return None
@@ -190,15 +204,16 @@ class Jubilee:
 
         # NOTE AXIS SWAP - this is more intuitive based on the orientation
         # of the machine relative to my seat.
+        # FIXME you must also change the axis order in recall_poi() -- this should probably be...made less brittle...
         if 'x' in axis:
             self.x += step
-            self.send_cmd(f'G1 Y{self.x}')
+            self.send_cmd(f'G1 Y{self.x:0.2f}')
         elif 'y' in axis:
             self.y += step
-            self.send_cmd(f'G1 X{self.y}')
+            self.send_cmd(f'G1 X{self.y:0.2f}')
         elif 'z' in axis:
             self.z += step
-            self.send_cmd(f'G1 Z{self.z}')
+            self.send_cmd(f'G1 Z{self.z:0.2f}')
         else:
             print('axis not yet implemented')
     
@@ -233,28 +248,32 @@ class Jubilee:
         self.sleep(8) # enough time to boot?? TODO: there is probably a smarter way to watch for the boot condition
         return self.send_cmd('M115')
 
-    def set_poi(self, index):
+    def set_poi(self, index, theta, i, piezo):
         if not self.is_on():
             return
         # index should be a number from 1 through MAX_POI, inclusive
         if index > MAX_POI or index == 0:
             return
         logging.debug(f"POI {index} set to {self.x}, {self.y}, {self.z}")
-        self.poi[index - 1] = (self.x, self.y, self.z)
+        self.poi[index - 1] = Poi(self.x, self.y, self.z, theta, i, piezo)
 
     def recall_poi(self, index):
         if not self.is_on():
-            return
+            return None
         # index should be a number from 1 through MAX_POI, inclusive
         if index > MAX_POI or index == 0:
-            return
+            return None
         try:
-            (self.x, self.y, self.z) = self.poi[index - 1]
-        except ValueError as e:
+            poi = self.poi[index - 1]
+            self.x = poi.x
+            self.y = poi.y
+            self.z = poi.z
+        except AttributeError as e:
             logging.debug(f"POI {index} has not been set")
-            return
+            return None
         logging.debug(f"Recalling to POI {index}: {self.x}, {self.y}, {self.z}")
-        return self.send_cmd(f'G1 X{self.x} Y{self.y} Z{self.z}')
+        self.send_cmd(f'G1 Y{self.x:0.2f} X{self.y:0.2f} Z{self.z:0.2f}')
+        return (poi.theta, poi.i, poi.piezo)
             
     def __exit__(self, exc_type, exc_value, traceback):
         if self.ser.is_open:
@@ -333,6 +352,9 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
     all_leds_off(schema, midi)
     gamma_enabled = False
     last_gamma = 1.0
+    last_angle = None
+    last_intensity = None
+    last_piezo = None
     
     #for msg in midi.midi:
     while True:
@@ -352,7 +374,7 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                     exit(1)
                 else:
                     continue
-            if control_node in str(msg):
+            if control_node + ' ' in str(msg):
                 valid = True
                 # sliders
                 if 'control=' in control_node:
@@ -365,12 +387,15 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                     if name == "angle-light":
                         angle = (float(control_value) * (MAX_ANGLE - MIN_ANGLE) / 127.0) + float(MIN_ANGLE)
                         light.send_cmd(f"A {int(angle)}")
+                        last_angle = int(angle)
                     elif name == "brightness-light":
                         bright = float(control_value) * (MAX_LIGHT / 127.0)
                         light.send_cmd(f"I {int(bright)}")
+                        last_intensity = int(bright)
                     elif name == "nudge-piezo":
                         nudge = float(control_value) * (MAX_PIEZO / 127.0)
                         piezo.send_cmd(f"A {int(nudge)}")
+                        last_piezo = int(nudge)
                     elif name == "gamma":
                         last_gamma = (float(control_value) / 127.0) * MAX_GAMMA
                         if gamma_enabled:
@@ -421,11 +446,23 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                             maybe_poi = re.findall(r'^set POI (\d)', name)
                             if len(maybe_poi) == 1:
                                 midi.set_led_state(note_id, True)
-                                jubilee.set_poi(int(maybe_poi[0]))
+                                jubilee.set_poi(int(maybe_poi[0]), last_angle, last_intensity, last_piezo)
                         elif 'recall POI' in name:
                             maybe_poi = re.findall(r'^recall POI (\d)', name)
                             if len(maybe_poi) == 1:
-                                jubilee.recall_poi(int(maybe_poi[0]))
+                                maybe_poi = jubilee.recall_poi(int(maybe_poi[0]))
+                                if maybe_poi is not None:
+                                    (l_t, l_i, l_p) = maybe_poi
+                                    logging.debug(f"Recalling poi {l_t} {l_i} {l_p}")
+                                    if l_t is not None:
+                                        light.send_cmd(f"A {l_t}")
+                                        last_angle = l_t # l_t is for "light_theta"
+                                    if l_i is not None:
+                                        light.send_cmd(f"I {l_i}")
+                                        last_intensity = l_i
+                                    if l_p is not None:
+                                        piezo.send_cmd(f"A {l_p}")
+                                        last_piezo = l_p
                         elif name == 'quit button':
                             jubilee.motors_off()
                             all_leds_off(schema, midi)
@@ -441,6 +478,11 @@ def loop(args, jubilee, midi, light, piezo, gamma, schema):
                                 midi.set_led_state(note_id, True)
                                 gamma_enabled = True
                                 gamma.gamma = last_gamma
+                        elif name == 'report position button':
+                            try:
+                                logging.info(f"X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {last_piezo}, Z': {(jubilee.z + last_piezo * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {last_intensity}, A: {last_angle}")
+                            except:
+                                logging.info("Machine is IDLE or controls not synchronized")
                     elif 'note_off' in str(msg):
                         # the button was lifted
                         if 'zero' in name:
