@@ -583,9 +583,17 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             x_path = np.arange(min_x, max_x, args.stepsize)
                             if len(x_path) == 0: # this happens if min == max
                                 x_path = [min_x]
+                            # make sure we include the end interval in the photo region
+                            if max(x_path) < max_x:
+                                x_path = np.append(x_path, max(x_path) + args.stepsize)
+                            assert(max(x_path) >= max_x)
                             y_path = np.arange(min_y, max_y, args.stepsize)
-                            if len(y_path) == 0:
+                            if len(y_path) == 0: # handle min == max
                                 y_path = [min_y]
+                            # make sure we include the end interval in the photo region
+                            if max(y_path) < max_y:
+                                y_path = np.append(y_path, max(y_path) + args.stepsize)
+                            assert(max(y_path) >= max_y)
 
                             # derive Z-plane equation
                             p = []
