@@ -9,6 +9,7 @@ import qimage2ndarray
 
 from threading import Thread, Event
 from pathlib import Path
+import time
 
 def adjust_gamma(image, gamma=1.0):
 	# build a lookup table mapping the pixel values [0, 255] to
@@ -474,7 +475,13 @@ class MainWindow(QMainWindow):
                             fname = self.image_name.name + '/' + self.image_name.get_name() + '.png'
                             logging.info(f"Writing {fname}")
                             cv2.imwrite(fname, grayscale, [cv2.IMWRITE_PNG_COMPRESSION, 5])
-                            logging.info("done")
+                            logging.debug("done")
+                            if self.image_name.dummy:
+                                # For some reason, the file has to be *written* for the exposure to set
+                                # a dummy delay doesn't do it. Talk about spookey side effects...
+                                logging.debug("Deleting")
+                                p = Path(fname)
+                                p.unlink(missing_ok=True)
                             self.hcam.put_ExpoAGain(curgain)
                             self.hcam.put_ExpoTime(curtime)
                         else:
@@ -490,10 +497,14 @@ def snapper(w, image_name, auto_snap_event, auto_snap_done):
             break
         w.image_name = image_name
         if image_name.rep is not None:
-            rep = int(image_name.rep)
+            rep = int(image_name.rep) + 1 # +1 for the dummy exposure
         else:
-            rep = 1
+            rep = 2
         for i in range(rep):
+            if i == 0:
+                w.image_name.dummy = True
+            else:
+                w.image_name.dummy = False
             w.image_name.cur_rep = i
             w.hcam.Snap(0)
             w.single_snap_done.wait()

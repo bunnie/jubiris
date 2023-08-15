@@ -388,6 +388,7 @@ class ImageNamer:
         self.rep = None # repetitions of the same spot
         self.cur_rep = None
         self.quit = False # flag to indicate if we're exiting
+        self.dummy = False
     def is_init(self):
         return self.name is not None and self.x is not None and self.y is not None \
         and self.z is not None and self.p is not None \
