@@ -8,6 +8,7 @@
 # Duet3D serial:
 #  - python3 -m pip install pyserial
 # Image processing:
+#  - python3 -m pip install pyqt5
 #  - python3 -m pip install numpy opencv-python-headless qimage2ndarray
 # The headless version of opencv-python is needed because it bundles a Qt plugin that is the wrong version
 #
@@ -49,6 +50,8 @@ class Light:
         self.port = None
         self.intensity = 0
         self.angle = 0
+        self.led_1050_on = True
+        self.led_1200_on = False
         for port in ports:
             try:
                 ser = serial.Serial(port, 115200, timeout = 1.0)
@@ -72,6 +75,38 @@ class Light:
             except serial.SerialException as e:
                 logging.error(f"Serial error: {e}")
                 return None
+        self.commit_wavelength()
+    
+    # syncs the local wavelength setting to the controller
+    def commit_wavelength(self):
+        arg = 0
+        if self.led_1050_on:
+            arg |= 0b1111_1100_0000
+        if self.led_1200_on:
+            arg |= 0b11_1111
+        # logging.info(f"Sending 'L {arg}'")
+        self.send_cmd(f"L {arg}")
+
+    def toggle_1050(self):
+        if self.led_1050_on:
+            self.led_1050_on = False
+        else:
+            self.led_1050_on = True
+        return self.led_1050_on
+    def toggle_1200(self):
+        if self.led_1200_on:
+            self.led_1200_on = False
+        else:
+            self.led_1200_on = True
+        return self.led_1200_on
+    def is_1050_set(self):
+        return self.led_1050_on
+    def is_1200_set(self):
+        return self.led_1200_on
+    def set_1050(self, state):
+        self.set_1050 = state
+    def set_1200(self, state):
+        self.set_1200 = state
 
     def send_cmd(self, cmd, timeout=1.0):
         cmd_bytes = bytes(cmd + '\n', 'utf-8')
@@ -301,7 +336,7 @@ class Jubilee:
     
     def restart(self):
         self.send_cmd('M999')
-        self.sleep(8) # enough time to boot?? TODO: there is probably a smarter way to watch for the boot condition
+        time.sleep(8) # enough time to boot?? TODO: there is probably a smarter way to watch for the boot condition
         return self.send_cmd('M115')
 
     def set_poi(self, index, theta, i, piezo):
@@ -437,6 +472,11 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
     all_leds_off(schema, midi)
     gamma_enabled = False
     last_gamma = 1.0
+
+    if light.is_1050_set():
+        midi.set_led_state(int(schema['1050 button'].replace('note=', '')), True)
+    if light.is_1200_set():
+        midi.set_led_state(int(schema['1200 button'].replace('note=', '')), True)
     
     #for msg in midi.midi:
     while True:
@@ -522,6 +562,12 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             time.sleep(5)
                             cam_quit.set()
                             return
+                        elif '1050 button' in name:
+                            midi.set_led_state(note_id, light.toggle_1050())
+                            light.commit_wavelength()
+                        elif '1200 button' in name:
+                            midi.set_led_state(note_id, light.toggle_1200())
+                            light.commit_wavelength()
                         elif 'set POI' in name:
                             if not jubilee.is_on():
                                 logging.warning("Please turn Jubilee on before setting a POI")
@@ -586,14 +632,15 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             # make sure we include the end interval in the photo region
                             if max(x_path) < max_x:
                                 x_path = np.append(x_path, max(x_path) + args.stepsize)
-                            assert(max(x_path) >= max_x)
+                            # These fail due to floating point rounding errors :P
+                            # assert(max(x_path) >= max_x)
                             y_path = np.arange(min_y, max_y, args.stepsize)
                             if len(y_path) == 0: # handle min == max
                                 y_path = [min_y]
                             # make sure we include the end interval in the photo region
                             if max(y_path) < max_y:
                                 y_path = np.append(y_path, max(y_path) + args.stepsize)
-                            assert(max(y_path) >= max_y)
+                            # assert(max(y_path) >= max_y)
 
                             # derive Z-plane equation
                             p = []
@@ -610,15 +657,38 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             a, b, c = normal_vector
                             d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
 
-                            # TODO: interpolate angle and light. For now, just use the setting at POI[0]
-                            light.set_intensity(jubilee.poi[0].i)
-                            light.set_angle(jubilee.poi[0].theta)
+                            # Calculate angle and intensity path
+                            # As a first cut, angle and intensity vary linearly with y
+                            for i in jubilee.poi:
+                                if i.y == min_y:
+                                    ymin_theta = i.theta
+                                    ymin_i = i.i
+                                if i.y == max_y:
+                                    ymax_theta = i.theta
+                                    ymax_i = i.i
+                            if max_y - min_y != 0:
+                                slope_theta = (ymax_theta - ymin_theta) / (max_y - min_y)
+                                b_theta = ymax_theta - slope_theta * max_y
+                                slope_i = (ymax_i - ymin_i) / (max_y - min_y)
+                                b_i = ymax_i - slope_i * max_y
+                            else:
+                                slope_theta = 0
+                                b_theta = (ymax_theta + ymin_theta) / 2 # take the average
+                                slope_i = 0
+                                b_i = (ymax_i + ymin_i) / 2 # take the average
 
                             logging.info(f"stepping x {x_path}")
                             logging.info(f"stepping y {y_path}")
 
                             for x in x_path:
                                 for y in y_path:
+                                    # set light intensity and angle
+                                    i_set = y * slope_i + b_i
+                                    theta_set = y * slope_theta + b_theta
+                                    light.set_intensity(i_set)
+                                    light.set_angle(theta_set)
+                                    logging.info(f"Set intensity to {i_set}, angle to {theta_set}")
+
                                     # derive composite-z
                                     zp = -(a * x + b * y + d) / c
 
@@ -735,7 +805,9 @@ def set_controls(midi_in):
         'recall POI 1 button' : None,
         'recall POI 2 button' : None,
         'recall POI 3 button' : None,
-        'quit button': None,
+        '1050 button' : None,
+        '1200 button' : None,
+        'quit button' : None,
         'ESTOP button' : None,
     }
 

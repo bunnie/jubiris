@@ -23,6 +23,8 @@
     "recall POI 1 button": "note=16",
     "recall POI 2 button": "note=19",
     "recall POI 3 button": "note=22",
+    "1050 button": "note=3",
+    "1200 button": "note=6",
     "quit button": "note=4",
     "ESTOP button": "note=26"
 }
