@@ -17,6 +17,7 @@
 
 import argparse
 import serial
+import serial.tools.list_ports
 import mido
 import json
 import time
@@ -28,6 +29,11 @@ from cam import cam
 from threading import Thread, Event
 import numpy as np
 import math
+
+SERIAL_NO_LED   = 'FTCYSOO2'
+SERIAL_NO_PIEZO = 'FTCYSQ4J'
+SERIAL_NO_MOT0  = 'FTD3MKXS'
+SERIAL_NO_MOT1  = 'FTD3MLD8'
 
 SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 2
@@ -905,8 +911,21 @@ def main():
     if not isinstance(numeric_level, int):
         raise ValueError('Invalid log level: %s' % args.loglevel)
     logging.basicConfig(level=numeric_level)
-    # TODO: turn this into a command line argument
-    iris_ports = ['/dev/ttyUSB0', '/dev/ttyUSB1', '/dev/ttyUSB2', '/dev/ttyUSB3']
+
+    possible_ports = list(serial.tools.list_ports.comports())
+    led_port = None
+    piezo_port = None
+    mot0_port = None
+    mot1_port = None
+    for port, _desc, hwid in possible_ports:
+        if SERIAL_NO_LED in hwid:
+            led_port = port
+        elif SERIAL_NO_PIEZO in hwid:
+            piezo_port = port
+        elif SERIAL_NO_MOT0 in hwid:
+            mot0_port = port
+        elif SERIAL_NO_MOT1 in hwid:
+            mot1_port = port
 
     # Automatically pick a MIDI device, or take one from command line if specified
     if args.midi_port is None:
@@ -950,8 +969,8 @@ def main():
     # locks up the USB port if it is plugged in while the main board comes up.
     jubilee = Jubilee(args.duet_port)
     midi = Midi(midimix_name)
-    light = Light(iris_ports)
-    piezo = Piezo(iris_ports)
+    light = Light([led_port])
+    piezo = Piezo([piezo_port])
     logging.info("MIDI-to-Jubilee Controller Starting. Motors are IDLE.")
     logging.info("---> Please press SEND ALL to initialize <---")
     # wrap in 'with' so we can shut things down on exit if necessary
