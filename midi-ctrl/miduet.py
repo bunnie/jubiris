@@ -927,6 +927,8 @@ def main():
         elif SERIAL_NO_MOT1 in hwid:
             mot1_port = port
 
+    logging.info(f"Found LED on {led_port}, piezo on {piezo_port}\nmot0 on {mot0_port}, mot1 on {mot1_port}")
+    
     # Automatically pick a MIDI device, or take one from command line if specified
     if args.midi_port is None:
         input_list = mido.get_input_names()
@@ -969,7 +971,9 @@ def main():
     # locks up the USB port if it is plugged in while the main board comes up.
     jubilee = Jubilee(args.duet_port)
     midi = Midi(midimix_name)
+    logging.info(f"Opening LED port {led_port}")
     light = Light([led_port])
+    logging.info(f"Opening Piezo port {piezo_port}")
     piezo = Piezo([piezo_port])
     logging.info("MIDI-to-Jubilee Controller Starting. Motors are IDLE.")
     logging.info("---> Please press SEND ALL to initialize <---")
