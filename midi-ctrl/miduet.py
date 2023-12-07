@@ -71,8 +71,8 @@ class Light:
                     line += c.decode('utf-8')
                     if 'OK\n' in line:
                         break
-                if "V1 LED" in line:
-                    logging.debug(f"Found V1 LED on {port}")
+                if "V2 LED" in line:
+                    logging.debug(f"Found V2 LED on {port}")
                     self.ser = ser
                     self.port = port
                     break
