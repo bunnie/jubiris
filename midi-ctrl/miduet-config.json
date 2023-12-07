@@ -1,5 +1,5 @@
 {
-    "version": 2,
+    "version": 3,
     "x-coarse": "control=52",
     "y-coarse": "control=56",
     "z-coarse": "control=60",
@@ -10,8 +10,11 @@
     "gamma button": "note=9",
     "report position button": "note=25",
     "automate button": "note=27",
-    "angle-light": "control=49",
-    "brightness-light": "control=31",
+    "angle-local": "control=49",
+    "brightness-local": "control=31",
+    "angle-remote": "control=23",
+    "brightness-remote": "control=19",
+    "rotation": "control=30",
     "nudge-piezo": "control=62",
     "zero-x button": "note=18",
     "zero-y button": "note=21",
@@ -24,7 +27,6 @@
     "recall POI 2 button": "note=19",
     "recall POI 3 button": "note=22",
     "1050 button": "note=3",
-    "1200 button": "note=6",
     "quit button": "note=4",
     "ESTOP button": "note=26"
 }

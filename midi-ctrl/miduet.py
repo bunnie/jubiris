@@ -30,16 +30,18 @@ from threading import Thread, Event
 import numpy as np
 import math
 
+import iqmotion as iq
+
 SERIAL_NO_LED   = 'FTCYSOO2'
 SERIAL_NO_PIEZO = 'FTCYSQ4J'
 SERIAL_NO_MOT0  = 'FTD3MKXS'
 SERIAL_NO_MOT1  = 'FTD3MLD8'
 
 SCHEMA_STORAGE = 'miduet-config.json'
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_POI = 3
-MIN_ANGLE = -100
-MAX_ANGLE = 100
+MIN_ROTATION_ANGLE = -190
+MAX_ROTATION_ANGLE = 190
 MAX_LIGHT = 4096
 MAX_PIEZO = 8192 #16383
 MAX_GAMMA = 2.0
@@ -51,47 +53,158 @@ PIEZO_UM_PER_LSB = 0.007425
 
 cam_quit = Event()
 
+def send_tranjectory(iq_module, time_cmd, angle_cmd):
+    iq_module.set(
+        "multi_turn_angle_control", "trajectory_angular_displacement", angle_cmd
+    )
+    iq_module.set("multi_turn_angle_control", "trajectory_duration", time_cmd)
+
 class Light:
-    def __init__(self, ports=[]):
+    def __init__(self, light, mot_local, mot_remote):
         self.port = None
-        self.intensity = 0
-        self.angle = 0
+        self.intensity_local = 0
+        self.intensity_remote = 0
+        self.angle_local = 64
+        self.angle_remote = 64
         self.led_1050_on = True
-        self.led_1200_on = False
-        for port in ports:
-            try:
-                ser = serial.Serial(port, 115200, timeout = 1.0)
-                logging.debug(f"Trying port {port} for light")
-                ser.write(bytes("?\n", 'utf-8'))
-                line = ''
-                while True:
-                    c = ser.read(1)
-                    if len(c) == 0:
-                        break
-                    line += c.decode('utf-8')
-                    if 'OK\n' in line:
-                        break
-                if "V2 LED" in line:
-                    logging.debug(f"Found V2 LED on {port}")
-                    self.ser = ser
-                    self.port = port
+        try:
+            ser = serial.Serial(light, 115200, timeout = 1.0)
+            logging.debug(f"Trying port {light} for light")
+            ser.write(bytes("?\n", 'utf-8'))
+            line = ''
+            while True:
+                c = ser.read(1)
+                if len(c) == 0:
                     break
-                else:
-                    ser.close()
-            except serial.SerialException as e:
-                logging.error(f"Serial error: {e}")
-                return None
+                line += c.decode('utf-8')
+                if 'OK\n' in line:
+                    break
+            if "V2 LED" in line:
+                logging.debug(f"Found V2 LED on {light}")
+                self.ser = ser
+                self.port = light
+            else:
+                ser.close()
+        except serial.SerialException as e:
+            logging.error(f"Serial error: {e}")
+            return None
+        if self.port is None:
+            logging.error(f"Couldn't find LED controller on {light}")
+            exit(1)
         self.commit_wavelength()
+        self.com = {}
+        self.iq = {}
+        self.cur_angle = {}
+        self.com['local'] = iq.SerialCommunicator(mot_local)
+        self.iq['local'] = iq.ServoModule(self.com['local'], 0)
+        self.com['remote'] = iq.SerialCommunicator(mot_remote)
+        self.iq['remote'] = iq.ServoModule(self.com['remote'], 0)
+
+        self.upper_limit = {}
+        self.lower_limit = {}
+        self.get_limit_switches()
+        self.upper_angle_limit = {}
+        self.lower_angle_limit = {}
+
+        logging.info("Homing remote light...")
+        self.home_angle('remote')
+        logging.info("Homing local light...")
+        self.home_angle('local')
+
+    def read_angle(self, which):
+        return self.iq[which].get("multi_turn_angle_control", "obs_angular_displacement")
+    def nudge_angle(self, which, how_much, movement_time=0.1):
+        self.cur_angle[which] = self.read_angle(which)
+        new_angle = self.cur_angle[which] + how_much
+        send_tranjectory(self.iq[which], movement_time, new_angle)
+        time.sleep(movement_time)
+        self.cur_angle[which] = self.read_angle(which)
+    def set_angle(self, which, angle, movement_time=0.2):
+        MAX_SLEW = 5 * math.pi / 0.2
+        if angle < self.lower_angle_limit[which] or angle > self.upper_angle_limit[which]:
+            logging.error(f"Requested angle {angle} is out of bounds, doing nothing!")
+            self.cur_angle[which] = self.read_angle(which)
+            return
+        
+        # limit the slew rate of the motor
+        slew = abs(self.cur_angle[which] - angle) / movement_time # rads/s
+        if slew > MAX_SLEW:
+            movement_time = abs(self.cur_angle[which] - angle) / MAX_SLEW
+
+        send_tranjectory(self.iq[which], movement_time, angle)
+        time.sleep(movement_time)
+        self.cur_angle[which] = self.read_angle(which)
+
+    def other_motor(self, which):
+        if which == 'local':
+            return 'remote'
+        elif which == 'remote':
+            return 'local'
+        else:
+            logging.error("invalid motor specifier, abort!")
+            exit(1)
+
+    def home_angle(self, which):
+        INCREMENT = math.pi
+        #while True:
+        #    self.get_limit_switches()
+        self.get_limit_switches()
+        if self.lower_limit[which] and self.upper_limit[which] or \
+            self.lower_limit[self.other_motor(which)] and self.upper_limit[self.other_motor(which)]:
+            logging.error("Both upper and lower limit switches are set, aborting homing!")
+            return
+        
+        # if a limit switch is currently hit, back us off
+        adjusted = False
+        if self.lower_limit[which]:
+            adjusted = True
+            self.nudge_angle(which, INCREMENT * 3)
+        elif self.upper_limit[which]:
+            adjusted = True
+            self.nudge_angle(which, -INCREMENT * 3)
+        elif self.lower_limit[self.other_motor(which)]:
+            adjusted = True
+            self.nudge_angle(self.other_motor(which), INCREMENT * 3)
+        elif self.upper_limit[which]:
+            adjusted = True
+            self.nudge_angle(self.other_motor[which], -INCREMENT * 3)
+        if adjusted:
+            time.sleep(1.0)
+            self.get_limit_switches()
+        
+        # search down
+        while not self.upper_limit[which] and not self.lower_limit[which] and \
+            not self.upper_limit[self.other_motor(which)] and not self.lower_limit[self.other_motor(which)]:
+            self.nudge_angle(which, -INCREMENT)
+            self.get_limit_switches()
+        assert self.lower_limit[which], "wrong limit switch hit!"
+        self.lower_angle_limit[which] = self.read_angle(which)
+
+        # back off the lower limit
+        self.nudge_angle(which, INCREMENT * 34, movement_time=1)
+        # let limit switch rebound
+        time.sleep(1)
+        self.get_limit_switches()
+
+        # search up
+        while not self.upper_limit[which] and not self.lower_limit[which] and \
+            not self.upper_limit[self.other_motor(which)] and not self.lower_limit[self.other_motor(which)]:
+            self.nudge_angle(which, INCREMENT)
+            self.get_limit_switches()
+        assert self.upper_limit[which], "wrong limit switch hit!"
+        self.upper_angle_limit[which] = self.read_angle(which)
+
+        # center it
+        center_angle = (self.upper_angle_limit[which] + self.lower_angle_limit[which]) / 2
+        self.set_angle(which, center_angle, movement_time=1.0)
     
     # syncs the local wavelength setting to the controller
     def commit_wavelength(self):
         arg = 0
         if self.led_1050_on:
-            arg |= 0b1111_1100_0000
-        if self.led_1200_on:
-            arg |= 0b11_1111
-        # logging.info(f"Sending 'L {arg}'")
-        self.send_cmd(f"L {arg}")
+            self.send_cmd("L")
+        else:
+            self.send_cmd("H")
 
     def toggle_1050(self):
         if self.led_1050_on:
@@ -99,20 +212,10 @@ class Light:
         else:
             self.led_1050_on = True
         return self.led_1050_on
-    def toggle_1200(self):
-        if self.led_1200_on:
-            self.led_1200_on = False
-        else:
-            self.led_1200_on = True
-        return self.led_1200_on
     def is_1050_set(self):
         return self.led_1050_on
-    def is_1200_set(self):
-        return self.led_1200_on
     def set_1050(self, state):
         self.set_1050 = state
-    def set_1200(self, state):
-        self.set_1200 = state
 
     def send_cmd(self, cmd, timeout=1.0):
         cmd_bytes = bytes(cmd + '\n', 'utf-8')
@@ -132,7 +235,11 @@ class Light:
         logging.debug(line)
         return timeout
     
-    def set_intensity(self, i):
+    def set_angle_from_control(self, a, which):
+        angle = (a / 127.0) * (self.upper_angle_limit[which] - self.lower_angle_limit[which]) + self.lower_angle_limit[which]
+        self.set_angle(which, angle)
+
+    def set_intensity_local(self, i):
         i = int(i)
         if i > MAX_LIGHT:
             logging.warning(f"requested intensity too great {i}")
@@ -141,28 +248,71 @@ class Light:
             logging.warning(f"requested intensity out of range {i}")
             return
         self.send_cmd(f"I {i}")
-        self.intensity = i
+        self.intensity_local = i
 
-    def set_angle(self, a):
-        a = int(a)
-        if a > MAX_ANGLE:
-            logging.warning(f"requested angle too great {a}")
+    def set_intensity_remote(self, i):
+        i = int(i)
+        if i > MAX_LIGHT:
+            logging.warning(f"requested intensity too great {i}")
             return
-        if a < MIN_ANGLE:
-            logging.warning(f"requested angle too small {a}")
+        if i < 0:
+            logging.warning(f"requested intensity out of range {i}")
             return
-        self.send_cmd(f"A {a}")
-        self.angle = a
+        self.send_cmd(f"R {i}")
+        self.intensity_remote = i
+
+    def get_limit_switches(self):
+        self.ser.write(bytes("S\n", 'utf-8'))
+        line = ''
+        while True:
+            c = self.ser.read(1)
+            if len(c) == 0:
+                break
+            line += c.decode('utf-8')
+            if '\n' in line:
+                break
+        sws = line.strip().split(',')
+        errs = 0
+        for sw in sws:
+            if sw[:2] == 'LL':
+                self.lower_limit['local'] = sw[2] == '0'
+            elif sw[:2] == 'LU':
+                self.upper_limit['local'] = sw[2] == '0'
+            elif sw[:2] == 'RL':
+                self.lower_limit['remote'] = sw[2] == '0'
+            elif sw[:2] == 'RU':
+                self.upper_limit['remote'] = sw[2] == '0'
+            else:
+                logging.error("Limit switch readout corrupt!")
+                time.sleep(0.1)
+                if errs > 2:
+                    logging.error("Too many errors, quitting.")
+                    exit(0)
+                errs += 1
+        # clear the 'OK\n'
+        line = ''
+        while True:
+            c = self.ser.read(1)
+            if len(c) == 0:
+                break
+            line += c.decode('utf-8')
+            if '\n' in line:
+                break
+
+        logging.debug(f"upper sw: {self.upper_limit}, lower sw: {self.lower_limit}")
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self.ser.is_open:
-            self.send_cmd("I 0\n")
-            self.intensity = 0
-            self.send_cmd("A 0\n")
-            self.angle = 0
+            self.send_cmd("I 0")
+            self.intensity_local = 0
+            self.send_cmd("R 0")
+            self.intensity_remote = 0
+            # park the emitters near the bottom
+            self.set_angle('local', self.lower_angle_limit['local'] + 3 * math.pi)
+            self.set_angle('remote', self.lower_angle_limit['remote'] + 3 * math.pi)
             self.ser.close()
             logging.debug("Serial port closed")
 
@@ -329,6 +479,7 @@ class Jubilee:
         self.x = 0.0
         self.y = 0.0
         self.z = 10.0
+        self.rotation = 0.0 # TODO!! placeholder only
         self.send_cmd('G21') # millimeters
         self.send_cmd('G90') # absolute
         self.state = 'ON'
@@ -426,6 +577,9 @@ class ImageNamer:
         self.p = None  # raw piezo step value
         self.i = None  # intensity of light
         self.t = None  # theta of light
+        self.j = None  # remote intensity of light
+        self.u = None  # remote theta of light
+        self.a = None  # rotation of stage
         self.rep = None # repetitions of the same spot
         self.cur_rep = None
         self.quit = False # flag to indicate if we're exiting
@@ -439,7 +593,7 @@ class ImageNamer:
             r = str(self.cur_rep)
         else:
             r = '1'
-        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{self.p}_i{self.i}_t{self.t}_r{r}'
+        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{self.p}_i{self.i}_t{self.t}_j{self.j}_u{self.u}_a{self.a}_r{r}'
 
 def quitter(jubilee, light, piezo, cam_quit):
     cam_quit.wait()
@@ -481,16 +635,32 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
 
     if light.is_1050_set():
         midi.set_led_state(int(schema['1050 button'].replace('note=', '')), True)
-    if light.is_1200_set():
-        midi.set_led_state(int(schema['1200 button'].replace('note=', '')), True)
     
     #for msg in midi.midi:
+    local_angle_changed = False
+    remote_angle_changed = False
+    last_local_angle_control_value = 0.0
+    new_local_angle_control_value = 0.0
+    last_remote_angle_control_value = 0.0
+    new_remote_angle_control_value = 0.0
+
     while True:
         if cam_quit.is_set():
             all_leds_off(schema, midi)
             return
         msg = midi.midi.poll()
         if msg is None:
+            # Only update the motor value after the controller is stable for one cycle
+            if local_angle_changed:
+                if new_local_angle_control_value == last_local_angle_control_value:
+                    light.set_angle_from_control(new_local_angle_control_value, 'local')
+                    local_angle_changed = False
+                last_local_angle_control_value = new_local_angle_control_value
+            if remote_angle_changed:
+                if new_remote_angle_control_value == last_remote_angle_control_value:
+                    light.set_angle_from_control(new_remote_angle_control_value, 'remote')
+                    remote_angle_changed = False
+                last_remote_angle_control_value = new_remote_angle_control_value
             time.sleep(0) # yield our quantum
             continue
         # hugely inefficient O(n) search on every iter, but "meh"
@@ -513,12 +683,18 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             control_value = i.split('=')[1]
                             break
                     assert(control_value is not None)
-                    if name == "angle-light":
-                        angle = (float(control_value) * (MAX_ANGLE - MIN_ANGLE) / 127.0) + float(MIN_ANGLE)
-                        light.set_angle(int(angle))
-                    elif name == "brightness-light":
+                    if name == "angle-local":
+                        local_angle_changed = True
+                        new_local_angle_control_value = float(control_value)
+                    elif name == "brightness-local":
                         bright = float(control_value) * (MAX_LIGHT / 127.0)
-                        light.set_intensity(int(bright))
+                        light.set_intensity_local(int(bright))
+                    elif name == "angle-remote":
+                        remote_angle_changed = True
+                        new_remote_angle_control_value = float(control_value)
+                    elif name == "brightness-remote":
+                        bright = float(control_value) * (MAX_LIGHT / 127.0)
+                        light.set_intensity_remote(int(bright))
                     elif name == "nudge-piezo":
                         nudge = float(control_value) * (MAX_PIEZO / 127.0)
                         piezo.set_code(int(nudge))
@@ -570,9 +746,6 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             return
                         elif '1050 button' in name:
                             midi.set_led_state(note_id, light.toggle_1050())
-                            light.commit_wavelength()
-                        elif '1200 button' in name:
-                            midi.set_led_state(note_id, light.toggle_1200())
                             light.commit_wavelength()
                         elif 'set POI' in name:
                             if not jubilee.is_on():
@@ -665,23 +838,23 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
 
                             # Calculate angle and intensity path
                             # As a first cut, angle and intensity vary linearly with y
-                            for i in jubilee.poi:
-                                if i.y == min_y:
-                                    ymin_theta = i.theta
-                                    ymin_i = i.i
-                                if i.y == max_y:
-                                    ymax_theta = i.theta
-                                    ymax_i = i.i
-                            if max_y - min_y != 0:
-                                slope_theta = (ymax_theta - ymin_theta) / (max_y - min_y)
-                                b_theta = ymax_theta - slope_theta * max_y
-                                slope_i = (ymax_i - ymin_i) / (max_y - min_y)
-                                b_i = ymax_i - slope_i * max_y
-                            else:
-                                slope_theta = 0
-                                b_theta = (ymax_theta + ymin_theta) / 2 # take the average
-                                slope_i = 0
-                                b_i = (ymax_i + ymin_i) / 2 # take the average
+                            # for i in jubilee.poi:
+                            #     if i.y == min_y:
+                            #         ymin_theta = i.theta
+                            #         ymin_i = i.i
+                            #     if i.y == max_y:
+                            #         ymax_theta = i.theta
+                            #         ymax_i = i.i
+                            # if max_y - min_y != 0:
+                            #     slope_theta = (ymax_theta - ymin_theta) / (max_y - min_y)
+                            #     b_theta = ymax_theta - slope_theta * max_y
+                            #     slope_i = (ymax_i - ymin_i) / (max_y - min_y)
+                            #     b_i = ymax_i - slope_i * max_y
+                            # else:
+                            #     slope_theta = 0
+                            #     b_theta = (ymax_theta + ymin_theta) / 2 # take the average
+                            #     slope_i = 0
+                            #     b_i = (ymax_i + ymin_i) / 2 # take the average
 
                             logging.info(f"stepping x {x_path}")
                             logging.info(f"stepping y {y_path}")
@@ -689,11 +862,11 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             for x in x_path:
                                 for y in y_path:
                                     # set light intensity and angle
-                                    i_set = y * slope_i + b_i
-                                    theta_set = y * slope_theta + b_theta
-                                    light.set_intensity(i_set)
-                                    light.set_angle(theta_set)
-                                    logging.info(f"Set intensity to {i_set}, angle to {theta_set}")
+                                    # i_set = y * slope_i + b_i
+                                    # theta_set = y * slope_theta + b_theta
+                                    # light.set_intensity(i_set)
+                                    # light.set_angle(theta_set)
+                                    # logging.info(f"Set intensity to {i_set}, angle to {theta_set}")
 
                                     # derive composite-z
                                     zp = -(a * x + b * y + d) / c
@@ -731,8 +904,11 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                     image_name.y = jubilee.y
                                     image_name.z = jubilee.z
                                     image_name.p = piezo.code
-                                    image_name.i = light.intensity
-                                    image_name.t = light.angle
+                                    image_name.i = light.intensity_local
+                                    image_name.t = light.angle_local
+                                    image_name.j = light.intensity_remote
+                                    image_name.u = light.angle_remote
+                                    image_name.a = jubilee.rotation
                                     image_name.cur_rep = None
                                     image_name.rep = args.reps
                                     # wait for system to settle
@@ -786,6 +962,8 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                     if jubilee.step_axis(name, step):
                         logging.warning("Motor command timeout!")
                         midi.clear_events()
+                    
+                    # TODO: add the rotation control here
 
 def set_controls(midi_in):
     # Control schema layout
@@ -798,8 +976,11 @@ def set_controls(midi_in):
         'y-fine' : None,
         'z-fine' : None,
         'gamma' : None,
-        "angle-light" : None,
-        "brightness-light" : None,
+        "angle-local" : None,
+        "brightness-local" : None,
+        "angle-remote" : None,
+        "brightness-remote" : None,
+        "rotation" : None,
         "nudge-piezo" : None,
         'zero-x button' : None,
         'zero-y button' : None,
@@ -812,7 +993,6 @@ def set_controls(midi_in):
         'recall POI 2 button' : None,
         'recall POI 3 button' : None,
         '1050 button' : None,
-        '1200 button' : None,
         'quit button' : None,
         'ESTOP button' : None,
     }
@@ -972,7 +1152,7 @@ def main():
     jubilee = Jubilee(args.duet_port)
     midi = Midi(midimix_name)
     logging.info(f"Opening LED port {led_port}")
-    light = Light([led_port])
+    light = Light(led_port, mot0_port, mot1_port)
     logging.info(f"Opening Piezo port {piezo_port}")
     piezo = Piezo([piezo_port])
     logging.info("MIDI-to-Jubilee Controller Starting. Motors are IDLE.")
