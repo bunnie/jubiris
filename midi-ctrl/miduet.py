@@ -240,9 +240,9 @@ class Light:
     def set_angle_from_control(self, a, which):
         angle = (a / 127.0) * (self.upper_angle_limit[which] - self.lower_angle_limit[which]) + self.lower_angle_limit[which]
         if which == 'local':
-            self.angle_local = a
+            self.angle_local = int(a)
         elif which == 'remote':
-            self.angle_remote = a
+            self.angle_remote = int(a)
         else:
             logging.error(f"Incorrect specifier on angle: {which}, ignoring!")
             return
@@ -625,7 +625,7 @@ class ImageNamer:
             r = str(self.cur_rep)
         else:
             r = '1'
-        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{self.p}_i{self.i}_t{self.t}_j{self.j}_u{self.u}_a{self.a}_r{r}'
+        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{self.p}_i{self.i}_t{self.t}_j{self.j}_u{self.u}_a{self.a:0.1f}_r{r}'
 
 def quitter(jubilee, light, piezo, cam_quit):
     cam_quit.wait()
