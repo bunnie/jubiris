@@ -26,8 +26,9 @@ M83                        ; ...but relative extruder moves
 ; Motor (Drive) to Axis Mapping
 ;-------------------------------------------------------------------------------
 M584 X1.1 Y1.0            ; Map Corexy's X,Y axes to 3HC board port's 0 and 1. 
-M584 U0.1                 ; Map U axis (toolchanger lock) do main board port 1.
+M584 U0.1                 ; Map U axis (toolchanger lock) to main board port 1.
 M584 Z0.2:0.3:0.4         ; Map 3 axes for Z to main board ports 2, 3, and 4.
+M584 V0.0                 ; Map V axis (rotation of light) to main board port 0
 
 
 ; Motor (Drive) Currents and Directions
@@ -41,14 +42,16 @@ M906 Y{0.85*sqrt(2)*2500} ; generates a sinusoidal coil current so we can
                           ; steppers.
                                             
 M569 P0.2 S0              ; Flip Mainboard Motor 2 (Front Left Z) direction.
-M569 P0.3 S0              ; Flip Mainboard Motor 2 (Front Right Z) direction.
-M569 P0.4 S0              ; Flip Mainboard Motor 2 (Back Z) direction.
+M569 P0.3 S0              ; Flip Mainboard Motor 3 (Front Right Z) direction.
+M569 P0.4 S0              ; Flip Mainboard Motor 4 (Back Z) direction.
 M906 Z{0.7*sqrt(2)*1680}  ; 70% of 1680mA RMS current.
 
-M569 P0.1 S0              ; Flip Main Board Motor 0 (toolchanger) directon.
+M569 P0.1 S0              ; Flip Main Board Motor 1 (toolchanger) directon.
 M906 U670 I60             ; 100% of 670mA RMS current. idle 60%.
                           ; Note that the idle will be shared for all drivers.
 
+M569 P0.0 S0              ; Flip Main Board Motor 0 (rotation) direction.
+M906 V670 I60             ; 100% of 670mA RMS current.
 
 ; Kinematics
 ;-------------------------------------------------------------------------------
@@ -67,17 +70,19 @@ M671 X297.5:2.5:150 Y313.5:313.5:-16.5 S10 ; Front Left: (297.5, 313.5)
 ; XYZZZ are in steps/mm. U is in steps/degree. 
 ;-------------------------------------------------------------------------------
 
-M350 X1 Y1 Z1 U1       ; Disable microstepping to simplify calculations.
+M350 X1 Y1 Z1 U1 V1    ; Disable microstepping to simplify calculations.
 M92 X{1/(0.9*16/180)}  ; step angle * tooth count / 180 .
 M92 Y{1/(0.9*16/180)}  ; The 2mm tooth spacing cancel out with diam to radius.
 M92 Z{360/0.9/4}       ; 0.9 deg stepper / screw lead pitch (4mm) .
                        ; If using a T8x2 leadscrew, change 4 to 2.
 M92 U{13.76/1.8}       ; gear ratio / step angle for tool lock geared motor.
+M92 V{13.76/1.8}       ; this is probably not correct, but close, since the hub size is different.
 
 ; Enable microstepping.
 ; All steps-per-unit will be multiplied by the new step definition.
 M350 X16 Y16 I1        ; 16x microstepping for CoreXY axes. Use interpolation.
 M350 U4 I1             ; 4x for toolchanger lock. Use interpolation.
+M350 V4 I1             ; 4x for rotation. Use interpolation.
 M350 Z16 I1            ; 16x microstepping for Z axes. Use interpolation.
 
 
@@ -87,10 +92,11 @@ M201 X100 Y100       ; XY accelerations [mm/s^2]
                        ; XY accel can be increased up to 2500 or beyond later.
 M201 Z50              ; ZZZ Acceleration
 M201 U800              ; U accelerations [deg/s^2]
+M201 V300             ; V acceleration
 
-M203 X18000 Y18000 Z1600 U9000 ; Maximum axis speeds [mm/min]
+M203 X18000 Y18000 Z1600 U9000 V3000 ; Maximum axis speeds [mm/min]
                                ; If using a T8x2 leadscrew, change Z to 800.
-M566 X100 Y100 Z100 U50        ; Maximum jerk speeds [mm/min]
+M566 X100 Y100 Z100 U50 V30        ; Maximum jerk speeds [mm/min]
 
 
 ; Endstops and Probes 
@@ -99,6 +105,8 @@ M574 X1 S1 P"^1.io0.in"  ; 3HC X homing position X1 = axis min, S1 = switch type
 M574 Y1 S1 P"^1.io1.in"  ; 3HC Y homing position Y1 = axis min, S1 = switch type
 M574 U1 S1 P"^0.io1.in"  ; Mainboard U homing position.
                          ; U1 = axis min, S1 = switch type
+M574 V1 S1 P"^1.io4.in+^1.io3.in"  ; V1 axis end stops
+; M574 V2 S1 P"^1.io3.in"  ; V2 axis max (this doesn't work for some reason!)
 
 M574 Z0                  ; Configure z switch as a Z probe, not as an endstop. 
 M558 P8 C"io0.in" H3 F360 T6000 ; H = dive height
@@ -113,6 +121,7 @@ G31 K0 X0 Y0 Z-2        ; Set the limit switch as the "Control Point"
 ; of a centered 300x300mm square in the 305mmx305mm build plate.
 M208 X-13.75:313.75 Y-44:341 Z0:300
 M208 U0:200            ; Set Elastic Lock (U axis) max rotation angle
+M208 V-190:190         ; Set rotation (V axis) min and max rotation angle
 
 ; ESTOP
 M950 J1 C"io2.in"
