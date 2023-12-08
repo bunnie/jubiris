@@ -40,8 +40,10 @@ SERIAL_NO_MOT1  = 'FTD3MLD8'
 SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 3
 MAX_POI = 3
-MIN_ROTATION_ANGLE = -190
-MAX_ROTATION_ANGLE = 190
+MIN_ROTATION_ANGLE = -100.0
+MAX_ROTATION_ANGLE = 100.0
+CONTROL_MIN_ROTATION_ANGLE = -80.0 # somewhat not exactly degrees somehow...
+CONTROL_MAX_ROTATION_ANGLE = 80.0
 MAX_LIGHT = 4096
 MAX_PIEZO = 8192 #16383
 MAX_GAMMA = 2.0
@@ -169,7 +171,7 @@ class Light:
             adjusted = True
             self.nudge_angle(self.other_motor[which], -INCREMENT * 3)
         if adjusted:
-            time.sleep(1.0)
+            time.sleep(0.5)
             self.get_limit_switches()
         
         # search down
@@ -183,7 +185,7 @@ class Light:
         # back off the lower limit
         self.nudge_angle(which, INCREMENT * 34, movement_time=1)
         # let limit switch rebound
-        time.sleep(1)
+        time.sleep(0.2)
         self.get_limit_switches()
 
         # search up
@@ -311,8 +313,8 @@ class Light:
             self.send_cmd("R 0")
             self.intensity_remote = 0
             # park the emitters near the bottom
-            self.set_angle('local', self.lower_angle_limit['local'] + 3 * math.pi)
-            self.set_angle('remote', self.lower_angle_limit['remote'] + 3 * math.pi)
+            self.set_angle('local', self.lower_angle_limit['local'] + 3 * math.pi, movement_time=1.5)
+            self.set_angle('remote', self.lower_angle_limit['remote'] + 3 * math.pi, movement_time=1.5)
             self.ser.close()
             logging.debug("Serial port closed")
 
@@ -392,23 +394,32 @@ class Piezo:
             logging.debug("Serial port closed")
 
 class Poi:
-    def __init__(self, x, y, z, theta, i, piezo):
+    def __init__(self, x, y, z, piezo):
         self.x = x
         self.y = y
         self.z = z
-        self.theta = theta
-        self.i = i
         self.piezo = piezo
 
 class Jubilee:
     def __init__(self, port):
         self.port = port
+        self.state = 'OFF'
         try:
             ser = serial.Serial(port, 115200, timeout = 1.0)
             logging.debug("Duet3D serial port opened")
             self.ser = ser
             self.motors_off()
             self.poi = [None] * MAX_POI # this is an array of POI objects
+        except serial.SerialException as e:
+            logging.error(f"Serial error: {e}")
+            return None
+    
+    def update_port(self, port):
+        self.port = port
+        try:
+            ser = serial.Serial(port, 115200, timeout = 1.0)
+            logging.info(f"Duet3D serial port updated to {port}")
+            self.ser = ser
         except serial.SerialException as e:
             logging.error(f"Serial error: {e}")
             return None
@@ -450,6 +461,16 @@ class Jubilee:
             print('axis not yet implemented')
         return self.sync_to_mach()
     
+    def set_rotation(self, degrees):
+        if self.is_on():
+            if degrees < MIN_ROTATION_ANGLE or degrees > MAX_ROTATION_ANGLE:
+                logging.error(f"requested rotation {degrees} is out of bounds, ignoring")
+                return None
+            self.r = degrees
+            return self.send_cmd(f'G1 V{self.r:0.2f} H4')  # terminates movement on endstop
+        else:
+            return None
+    
     def goto(self, xyz_tuple):
         if not self.is_on():
             return False # don't return an error, just silently fail
@@ -464,10 +485,14 @@ class Jubilee:
         # NOTE axis swap is implemented at sync_to_mach
         return self.send_cmd(f'G1 Y{self.x:0.2f} X{self.y:0.2f} Z{self.z:0.2f}')
 
+    def reset(self):
+        return self.send_cmd('M999')
+
     def motors_off(self):
         self.x = None
         self.y = None
         self.z = None
+        self.r = None
         self.state = 'OFF'
         return self.send_cmd('M18')
     
@@ -475,11 +500,11 @@ class Jubilee:
         return self.state == 'ON'
     
     def motors_on_set_zero(self):
-        self.send_cmd('G92 X0 Y0 Z10 U0') # declare this position as origin
+        self.send_cmd('G92 X0 Y0 Z10 U0 V0') # declare this position as origin
         self.x = 0.0
         self.y = 0.0
         self.z = 10.0
-        self.rotation = 0.0 # TODO!! placeholder only
+        self.r = 0.0
         self.send_cmd('G21') # millimeters
         self.send_cmd('G90') # absolute
         self.state = 'ON'
@@ -496,14 +521,14 @@ class Jubilee:
         time.sleep(8) # enough time to boot?? TODO: there is probably a smarter way to watch for the boot condition
         return self.send_cmd('M115')
 
-    def set_poi(self, index, theta, i, piezo):
+    def set_poi(self, index, piezo):
         if not self.is_on():
             return
         # index should be a number from 1 through MAX_POI, inclusive
         if index > MAX_POI or index == 0:
             return
         logging.debug(f"POI {index} set to {self.x}, {self.y}, {self.z}")
-        self.poi[index - 1] = Poi(self.x, self.y, self.z, theta, i, piezo)
+        self.poi[index - 1] = Poi(self.x, self.y, self.z, piezo)
 
     def recall_poi(self, index):
         if not self.is_on():
@@ -521,7 +546,7 @@ class Jubilee:
             return None
         logging.debug(f"Recalling to POI {index}: {self.x}, {self.y}, {self.z}")
         self.sync_to_mach()
-        return (poi.theta, poi.i, poi.piezo)
+        return poi.piezo
             
     def __exit__(self, exc_type, exc_value, traceback):
         if self.ser.is_open:
@@ -636,13 +661,16 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
     if light.is_1050_set():
         midi.set_led_state(int(schema['1050 button'].replace('note=', '')), True)
     
-    #for msg in midi.midi:
+    # track state for commands that should not issue until the knob stops moving
     local_angle_changed = False
     remote_angle_changed = False
     last_local_angle_control_value = 0.0
     new_local_angle_control_value = 0.0
     last_remote_angle_control_value = 0.0
     new_remote_angle_control_value = 0.0
+    rotation_changed = False
+    last_rotation_value = 0.0
+    new_rotation_value = 0.0
 
     while True:
         if cam_quit.is_set():
@@ -661,6 +689,13 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                     light.set_angle_from_control(new_remote_angle_control_value, 'remote')
                     remote_angle_changed = False
                 last_remote_angle_control_value = new_remote_angle_control_value
+            if rotation_changed:
+                if new_rotation_value == last_rotation_value:
+                    r = (float(new_rotation_value) / 127.0) * \
+                            (CONTROL_MAX_ROTATION_ANGLE - CONTROL_MIN_ROTATION_ANGLE) + CONTROL_MIN_ROTATION_ANGLE
+                    jubilee.set_rotation(r)
+                    rotation_changed = False
+                last_rotation_value = new_rotation_value
             time.sleep(0) # yield our quantum
             continue
         # hugely inefficient O(n) search on every iter, but "meh"
@@ -704,6 +739,9 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             gamma.gamma = last_gamma 
                         else:
                             gamma.gamma = 1.0
+                    elif name == "rotation":
+                        rotation_changed = True
+                        new_rotation_value = float(control_value)
                     else:
                         curvals[name] = control_value
                         if refvals[name] is None:
@@ -754,22 +792,18 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             maybe_poi = re.findall(r'^set POI (\d)', name)
                             if len(maybe_poi) == 1:
                                 midi.set_led_state(note_id, True)
-                                jubilee.set_poi(int(maybe_poi[0]), light.angle, light.intensity, piezo.code)
-                                logging.info(f"Set POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
+                                jubilee.set_poi(int(maybe_poi[0]), piezo.code)
+                                logging.info(f"Set POI {maybe_poi[0]}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}")
                         elif 'recall POI' in name:
                             maybe_poi = re.findall(r'^recall POI (\d)', name)
                             if len(maybe_poi) == 1:
                                 poi_index = int(maybe_poi[0])
                                 maybe_poi = jubilee.recall_poi(poi_index)
                                 if maybe_poi is not None:
-                                    (l_t, l_i, l_p) = maybe_poi
-                                    if l_t is not None:
-                                        light.set_angle(l_t)
-                                    if l_i is not None:
-                                        light.set_intensity(l_i)
+                                    l_p = maybe_poi
                                     if l_p is not None:
                                         piezo.set_code(l_p)
-                                    logging.info(f"Recall POI {poi_index}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
+                                    logging.info(f"Recall POI {poi_index}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}")
 
                         elif name == 'quit button':
                             jubilee.motors_off()
@@ -788,7 +822,7 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                 gamma.gamma = last_gamma
                         elif name == 'report position button':
                             try:
-                                logging.info(f"X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}, I: {light.intensity}, A: {light.angle}")
+                                logging.info(f"X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}")
                             except:
                                 logging.info("Machine is IDLE or controls not synchronized")
                         elif name == 'automate button':
@@ -836,38 +870,11 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             a, b, c = normal_vector
                             d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
 
-                            # Calculate angle and intensity path
-                            # As a first cut, angle and intensity vary linearly with y
-                            # for i in jubilee.poi:
-                            #     if i.y == min_y:
-                            #         ymin_theta = i.theta
-                            #         ymin_i = i.i
-                            #     if i.y == max_y:
-                            #         ymax_theta = i.theta
-                            #         ymax_i = i.i
-                            # if max_y - min_y != 0:
-                            #     slope_theta = (ymax_theta - ymin_theta) / (max_y - min_y)
-                            #     b_theta = ymax_theta - slope_theta * max_y
-                            #     slope_i = (ymax_i - ymin_i) / (max_y - min_y)
-                            #     b_i = ymax_i - slope_i * max_y
-                            # else:
-                            #     slope_theta = 0
-                            #     b_theta = (ymax_theta + ymin_theta) / 2 # take the average
-                            #     slope_i = 0
-                            #     b_i = (ymax_i + ymin_i) / 2 # take the average
-
                             logging.info(f"stepping x {x_path}")
                             logging.info(f"stepping y {y_path}")
 
                             for x in x_path:
                                 for y in y_path:
-                                    # set light intensity and angle
-                                    # i_set = y * slope_i + b_i
-                                    # theta_set = y * slope_theta + b_theta
-                                    # light.set_intensity(i_set)
-                                    # light.set_angle(theta_set)
-                                    # logging.info(f"Set intensity to {i_set}, angle to {theta_set}")
-
                                     # derive composite-z
                                     zp = -(a * x + b * y + d) / c
 
@@ -908,7 +915,7 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                     image_name.t = light.angle_local
                                     image_name.j = light.intensity_remote
                                     image_name.u = light.angle_remote
-                                    image_name.a = jubilee.rotation
+                                    image_name.a = jubilee.r
                                     image_name.cur_rep = None
                                     image_name.rep = args.reps
                                     # wait for system to settle
@@ -1048,9 +1055,9 @@ def set_controls(midi_in):
 
 def main():
     parser = argparse.ArgumentParser(description="MIDI-to-Duet controller")
-    parser.add_argument(
-        "--duet-port", required=False, help="path to duet3d serial port", default='/dev/ttyACM0'
-    )
+    #parser.add_argument(
+    #    "--duet-port", required=False, help="path to duet3d serial port", default='/dev/ttyACM0'
+    #)
     parser.add_argument(
         "--midi-port", required=False, help="MIDI device name to use"
     )
@@ -1097,6 +1104,7 @@ def main():
     piezo_port = None
     mot0_port = None
     mot1_port = None
+    jubilee_port = None
     for port, _desc, hwid in possible_ports:
         if SERIAL_NO_LED in hwid:
             led_port = port
@@ -1106,8 +1114,10 @@ def main():
             mot0_port = port
         elif SERIAL_NO_MOT1 in hwid:
             mot1_port = port
+        elif 'ACM' in port:
+            jubilee_port = port
 
-    logging.info(f"Found LED on {led_port}, piezo on {piezo_port}\nmot0 on {mot0_port}, mot1 on {mot1_port}")
+    logging.info(f"Found LED on {led_port}, piezo on {piezo_port}\nmot0 on {mot0_port}, mot1 on {mot1_port}, jubilee on {jubilee_port}")
     
     # Automatically pick a MIDI device, or take one from command line if specified
     if args.midi_port is None:
@@ -1149,7 +1159,8 @@ def main():
     # the USB cable and then power cycling the Jubilee, and then plugging
     # the USB cable back in. There is a bug in the Duet3D firmware that
     # locks up the USB port if it is plugged in while the main board comes up.
-    jubilee = Jubilee(args.duet_port)
+    jubilee = Jubilee(jubilee_port)
+    jubilee.reset() # count on the time required to init the light controller for the Jubilee to finish resetting.
     midi = Midi(midimix_name)
     logging.info(f"Opening LED port {led_port}")
     light = Light(led_port, mot0_port, mot1_port)
@@ -1157,6 +1168,14 @@ def main():
     piezo = Piezo([piezo_port])
     logging.info("MIDI-to-Jubilee Controller Starting. Motors are IDLE.")
     logging.info("---> Please press SEND ALL to initialize <---")
+
+    # recover the Jubilee port after the reset
+    possible_ports = list(serial.tools.list_ports.comports())
+    for port, _desc, _hwid in possible_ports:
+        if 'ACM' in port:
+            jubilee_port = port
+    jubilee.update_port(port)
+
     # wrap in 'with' so we can shut things down on exit if necessary
     with jubilee as j:
         with midi as m:
