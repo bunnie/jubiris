@@ -239,6 +239,13 @@ class Light:
     
     def set_angle_from_control(self, a, which):
         angle = (a / 127.0) * (self.upper_angle_limit[which] - self.lower_angle_limit[which]) + self.lower_angle_limit[which]
+        if which == 'local':
+            self.angle_local = a
+        elif which == 'remote':
+            self.angle_remote = a
+        else:
+            logging.error(f"Incorrect specifier on angle: {which}, ignoring!")
+            return
         self.set_angle(which, angle)
 
     def set_intensity_local(self, i):
@@ -826,87 +833,114 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                             except:
                                 logging.info("Machine is IDLE or controls not synchronized")
                         elif name == 'automate button':
-                            # check that the POIs have been set
-                            if jubilee.poi[0] is None or jubilee.poi[1] is None:
-                                logging.warning("POIs have not been set, can't automate!")
-                                continue
-                            if jubilee.poi[2] is None:
-                                # simplify edge cases by just duplicating to create our third POI
-                                jubilee.poi[2] = jubilee.poi[1]
-                            # plan the path of steps
-                            min_x = min([i.x for i in jubilee.poi])
-                            max_x = max([i.x for i in jubilee.poi])
-                            min_y = min([i.y for i in jubilee.poi])
-                            max_y = max([i.y for i in jubilee.poi])
+                            if args.automation == 'step':
+                                # check that the POIs have been set
+                                if jubilee.poi[0] is None or jubilee.poi[1] is None:
+                                    logging.warning("POIs have not been set, can't automate!")
+                                    continue
+                                if jubilee.poi[2] is None:
+                                    # simplify edge cases by just duplicating to create our third POI
+                                    jubilee.poi[2] = jubilee.poi[1]
+                                # plan the path of steps
+                                min_x = min([i.x for i in jubilee.poi])
+                                max_x = max([i.x for i in jubilee.poi])
+                                min_y = min([i.y for i in jubilee.poi])
+                                max_y = max([i.y for i in jubilee.poi])
 
-                            x_path = np.arange(min_x, max_x, args.stepsize)
-                            if len(x_path) == 0: # this happens if min == max
-                                x_path = [min_x]
-                            # make sure we include the end interval in the photo region
-                            if max(x_path) < max_x:
-                                x_path = np.append(x_path, max(x_path) + args.stepsize)
-                            # These fail due to floating point rounding errors :P
-                            # assert(max(x_path) >= max_x)
-                            y_path = np.arange(min_y, max_y, args.stepsize)
-                            if len(y_path) == 0: # handle min == max
-                                y_path = [min_y]
-                            # make sure we include the end interval in the photo region
-                            if max(y_path) < max_y:
-                                y_path = np.append(y_path, max(y_path) + args.stepsize)
-                            # assert(max(y_path) >= max_y)
+                                x_path = np.arange(min_x, max_x, args.stepsize)
+                                if len(x_path) == 0: # this happens if min == max
+                                    x_path = [min_x]
+                                # make sure we include the end interval in the photo region
+                                if max(x_path) < max_x:
+                                    x_path = np.append(x_path, max(x_path) + args.stepsize)
+                                # These fail due to floating point rounding errors :P
+                                # assert(max(x_path) >= max_x)
+                                y_path = np.arange(min_y, max_y, args.stepsize)
+                                if len(y_path) == 0: # handle min == max
+                                    y_path = [min_y]
+                                # make sure we include the end interval in the photo region
+                                if max(y_path) < max_y:
+                                    y_path = np.append(y_path, max(y_path) + args.stepsize)
+                                # assert(max(y_path) >= max_y)
 
-                            # derive Z-plane equation
-                            p = []
-                            for i in range(3):
-                              p += [np.array((jubilee.poi[i].x, jubilee.poi[i].y, jubilee.poi[i].z - jubilee.poi[i].piezo  * PIEZO_UM_PER_LSB / 1000))]
+                                # derive Z-plane equation
+                                p = []
+                                for i in range(3):
+                                    p += [np.array((jubilee.poi[i].x, jubilee.poi[i].y, jubilee.poi[i].z - jubilee.poi[i].piezo  * PIEZO_UM_PER_LSB / 1000))]
 
-                            if np.array_equal(p[1], p[2]):
-                                p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
-                                p[2][1] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+                                if np.array_equal(p[1], p[2]):
+                                    p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+                                    p[2][1] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
 
-                            v1 = p[1] - p[0]
-                            v2 = p[2] - p[0]
-                            normal_vector = np.cross(v1, v2)
-                            a, b, c = normal_vector
-                            d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
+                                v1 = p[1] - p[0]
+                                v2 = p[2] - p[0]
+                                normal_vector = np.cross(v1, v2)
+                                a, b, c = normal_vector
+                                d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
 
-                            logging.info(f"stepping x {x_path}")
-                            logging.info(f"stepping y {y_path}")
+                                logging.info(f"stepping x {x_path}")
+                                logging.info(f"stepping y {y_path}")
 
-                            for x in x_path:
-                                for y in y_path:
-                                    # derive composite-z
-                                    zp = -(a * x + b * y + d) / c
+                                for x in x_path:
+                                    for y in y_path:
+                                        # derive composite-z
+                                        zp = -(a * x + b * y + d) / c
 
-                                    # Compute Z partition
-                                    if jubilee.z - zp > 0 and jubilee.z - zp < (PIEZO_MAX_CODE * PIEZO_UM_PER_LSB / 1000):
-                                        # see if we can get to zp without adjusting z at all
-                                        z = jubilee.z
-                                        p_lsb = ((z - zp) * 1000) / PIEZO_UM_PER_LSB
-                                        logging.info(f"p_lsb only: {z}, {p_lsb}")
-                                    else:
-                                        Z_INCREMENT = 1/0.02
-                                        z = math.ceil(zp * Z_INCREMENT) / Z_INCREMENT
-                                        # make up the rest with the piezo
-                                        p_lsb = ((z - zp) * 1000) / PIEZO_UM_PER_LSB
-                                        logging.info(f"z and p_lsb: {z}, {p_lsb}")
+                                        # Compute Z partition
+                                        if jubilee.z - zp > 0 and jubilee.z - zp < (PIEZO_MAX_CODE * PIEZO_UM_PER_LSB / 1000):
+                                            # see if we can get to zp without adjusting z at all
+                                            z = jubilee.z
+                                            p_lsb = ((z - zp) * 1000) / PIEZO_UM_PER_LSB
+                                            logging.info(f"p_lsb only: {z}, {p_lsb}")
+                                        else:
+                                            Z_INCREMENT = 1/0.02
+                                            z = math.ceil(zp * Z_INCREMENT) / Z_INCREMENT
+                                            # make up the rest with the piezo
+                                            p_lsb = ((z - zp) * 1000) / PIEZO_UM_PER_LSB
+                                            logging.info(f"z and p_lsb: {z}, {p_lsb}")
 
-                                    # check values
-                                    if p_lsb > PIEZO_MAX_CODE:
-                                        logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
-                                        continue
-                                    if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
-                                        logging.warning(f"Z value seems hazardous, aborting step: {z}")
-                                        continue
-                                    if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
-                                        logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
-                                        continue
+                                        # check values
+                                        if p_lsb > PIEZO_MAX_CODE:
+                                            logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
+                                            continue
+                                        if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
+                                            logging.warning(f"Z value seems hazardous, aborting step: {z}")
+                                            continue
+                                        if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
+                                            logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
+                                            continue
 
-                                    logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
-                                    jubilee.goto((x, y, z))
-                                    piezo.set_code(p_lsb)
+                                        logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
+                                        jubilee.goto((x, y, z))
+                                        piezo.set_code(p_lsb)
 
-                                    # setup the image_name object
+                                        # setup the image_name object
+                                        image_name.x = jubilee.x
+                                        image_name.y = jubilee.y
+                                        image_name.z = jubilee.z
+                                        image_name.p = piezo.code
+                                        image_name.i = light.intensity_local
+                                        image_name.t = light.angle_local
+                                        image_name.j = light.intensity_remote
+                                        image_name.u = light.angle_remote
+                                        image_name.a = jubilee.r
+                                        image_name.cur_rep = None
+                                        image_name.rep = args.reps
+                                        # wait for system to settle
+                                        logging.info(f"settling for {args.settling}s")
+                                        time.sleep(args.settling)
+                                        # this should trigger the picture
+                                        logging.info(f"triggering photos")
+                                        auto_snap_event.set()
+                                        auto_snap_done.wait()
+                                        logging.info(f"got photo done event")
+                                        # reset the flags
+                                        auto_snap_event.clear()
+                                        auto_snap_done.clear()
+
+                            elif args.automation == 'psi': # rotate the light around the vertical axis
+                                for psi in range(0, 90, 2):
+                                    jubilee.set_rotation(psi)
                                     image_name.x = jubilee.x
                                     image_name.y = jubilee.y
                                     image_name.z = jubilee.z
@@ -929,6 +963,35 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                     # reset the flags
                                     auto_snap_event.clear()
                                     auto_snap_done.clear()
+
+                            elif args.automation == 'theta': # rotate the light around the vertical axis
+                                for theta in range(0, 127, 2):
+                                    light.set_angle_from_control(theta, 'remote')
+                                    image_name.x = jubilee.x
+                                    image_name.y = jubilee.y
+                                    image_name.z = jubilee.z
+                                    image_name.p = piezo.code
+                                    image_name.i = light.intensity_local
+                                    image_name.t = light.angle_local
+                                    image_name.j = light.intensity_remote
+                                    image_name.u = light.angle_remote
+                                    image_name.a = jubilee.r
+                                    image_name.cur_rep = None
+                                    image_name.rep = args.reps
+                                    # wait for system to settle
+                                    logging.info(f"settling for {args.settling}s")
+                                    time.sleep(args.settling)
+                                    # this should trigger the picture
+                                    logging.info(f"triggering photos")
+                                    auto_snap_event.set()
+                                    auto_snap_done.wait()
+                                    logging.info(f"got photo done event")
+                                    # reset the flags
+                                    auto_snap_event.clear()
+                                    auto_snap_done.clear()
+
+                            else:
+                                logging.error("Unrecognized automation type, doing nothing.")
                             
                             logging.info("Automation done!")
 
@@ -1055,9 +1118,9 @@ def set_controls(midi_in):
 
 def main():
     parser = argparse.ArgumentParser(description="MIDI-to-Duet controller")
-    #parser.add_argument(
-    #    "--duet-port", required=False, help="path to duet3d serial port", default='/dev/ttyACM0'
-    #)
+    parser.add_argument(
+        "--automation", required=False, help="type of automation to run", default='step', choices=['step', 'psi', 'theta']
+    )
     parser.add_argument(
         "--midi-port", required=False, help="MIDI device name to use"
     )
