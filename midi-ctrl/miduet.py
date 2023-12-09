@@ -468,6 +468,9 @@ class Jubilee:
             print('axis not yet implemented')
         return self.sync_to_mach()
     
+    def get_rotation(self):
+        return self.r
+    
     def set_rotation(self, degrees):
         if self.is_on():
             if degrees < MIN_ROTATION_ANGLE or degrees > MAX_ROTATION_ANGLE:
@@ -939,8 +942,9 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                         auto_snap_done.clear()
 
                             elif args.automation == 'psi': # rotate the light around the vertical axis
-                                for psi in range(0, 90, 2):
-                                    jubilee.set_rotation(psi)
+                                psi_base = jubilee.get_rotation()
+                                for delta_psi in range(0, 95, 1):
+                                    jubilee.set_rotation(psi_base + delta_psi)
                                     image_name.x = jubilee.x
                                     image_name.y = jubilee.y
                                     image_name.z = jubilee.z
