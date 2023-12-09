@@ -625,7 +625,7 @@ class ImageNamer:
             r = str(self.cur_rep)
         else:
             r = '1'
-        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{self.p}_i{self.i}_t{self.t}_j{self.j}_u{self.u}_a{self.a:0.1f}_r{r}'
+        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}'
 
 def quitter(jubilee, light, piezo, cam_quit):
     cam_quit.wait()
