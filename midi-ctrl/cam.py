@@ -4,12 +4,17 @@ from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtWidgets import QLabel, QApplication, QWidget, QDesktopWidget, QCheckBox, QMessageBox, QMainWindow, QPushButton, QComboBox, QSlider, QGroupBox, QGridLayout, QBoxLayout, QHBoxLayout, QVBoxLayout, QMenu, QAction
 
 import numpy as np
-import cv2
 import qimage2ndarray
 
 from threading import Thread, Event
+import queue
 from pathlib import Path
 import time
+
+import os
+import cv2
+envpath = '/home/bunnie/.local/lib/python3.10/site-packages/cv2/qt/plugins/platforms'
+os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = envpath
 
 def adjust_gamma(image, gamma=1.0):
 	# build a lookup table mapping the pixel values [0, 255] to
@@ -42,7 +47,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(1400, 1600)
+        self.setMinimumSize(2000, 2000)
         self.image_name = None
         self.hcam = None
         self.timer = QTimer(self)
@@ -53,6 +58,9 @@ class MainWindow(QMainWindow):
         self.temp = toupcam.TOUPCAM_TEMP_DEF
         self.tint = toupcam.TOUPCAM_TINT_DEF
         self.count = 0
+        self.image_queue = None # this must be initialized to a Queue for image queuing code to run
+        self.ui_queue = None
+        self.oneshot_expo_print = False
 
         #gbox_res = QGroupBox("Resolution")
         #self.cmb_res = QComboBox()
@@ -356,6 +364,19 @@ class MainWindow(QMainWindow):
             pass
         else:
             image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGBX8888)
+            if self.image_queue is not None:
+                if not self.image_queue.full():
+                    cv2_image = qimage2ndarray.rgb_view(image)
+                    self.image_queue.put(cv2_image)
+                else:
+                    logging.debug("Image queue overflow, image dropped")
+            if self.ui_queue is not None:
+                try:
+                    ui_img = self.ui_queue.get(block=False)
+                except queue.Empty:
+                    pass
+                else:
+                    cv2.imshow("focus", ui_img)
 
             # extract bounds of the original image (before OpenCV processing)
             qr = image.rect()
@@ -432,11 +453,15 @@ class MainWindow(QMainWindow):
     def handleStillImageEvent(self):
         curtime = self.hcam.get_ExpoTime()
         curgain = self.hcam.get_ExpoAGain()
+        # Set gain to 100 for minumum noise
         new_gain = 100
         self.hcam.put_ExpoAGain(new_gain)
+        # compensate for lower gain with longer exposure time
         new_exp = int(2.0 * curtime * (curgain / new_gain))
         self.hcam.put_ExpoTime(new_exp)
-        logging.debug(f"Capture at gain={new_gain}, exp={new_exp}")
+        if not self.oneshot_expo_print:
+            logging.info(f"Capture at gain={new_gain}, exp={new_exp}")
+            self.oneshot_expo_print = True
         info = toupcam.ToupcamFrameInfoV3()
         try:
             self.hcam.PullImageV3(None, 1, 32, 0, info) # peek
@@ -514,7 +539,7 @@ def snapper(w, image_name, auto_snap_event, auto_snap_done):
         auto_snap_done.set()
 
 
-def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done):
+def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, image_queue, ui_queue):
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()
@@ -522,6 +547,8 @@ def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done):
     # auto-open the camera on boot
     w.btn_open.click()
     w.single_snap_done = Event()
+    w.image_queue = image_queue
+    w.ui_queue = ui_queue
 
     # Run a thread to forward/manage snapshotting events
     b = Thread(target=snapper, args=[w, image_name, auto_snap_event, auto_snap_done])

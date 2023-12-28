@@ -8,8 +8,16 @@
 # Duet3D serial:
 #  - python3 -m pip install pyserial
 # Image processing:
-#  - python3 -m pip install pyqt5
-#  - python3 -m pip install numpy opencv-python-headless qimage2ndarray
+#  PyQt5 is not natively compatible with OpenCv. To work around this, the following procedure is necessary.
+#  - This is tested in a Python 3.10 enviornment -- the pins below may not work with older versions of Python
+#  - Clean out any old opencv or pyqt5 installation:
+#    - `python3 -m pip list | grep -i cv`, `python3 -m pip list | grep -i qt`; `python3 -m pip uninstall` everything that was listed.
+#    - python3 -m pip install opencv-python==4.8.1.78
+#    - python3 -m pip install pyqt5==5.15.0
+#    - adjust the `envpath` variable below to point to the `cv2` envpath in your environment. The particular adjustments
+#      you'll have to make are at least for your home directory and also the version of Python you're using.
+#  - python3 -m pip install numpy qimage2ndarray
+
 # The headless version of opencv-python is needed because it bundles a Qt plugin that is the wrong version
 #
 # Helpful: https://docs.google.com/document/d/1zeRPklp_Mo_XzJZUKu2i-p1VgfBoUWF0JKZ5CzX8aB0/edit#heading=h.pb5rw66aumst
@@ -27,10 +35,16 @@ import re
 
 from cam import cam
 from threading import Thread, Event
+import queue
 import numpy as np
 import math
 
 import iqmotion as iq
+
+import os
+import cv2
+envpath = '/home/bunnie/.local/lib/python3.10/site-packages/cv2/qt/plugins/platforms'
+os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = envpath
 
 SERIAL_NO_LED   = 'FTCYSOO2'
 SERIAL_NO_PIEZO = 'FTCYSQ4J'
@@ -645,7 +659,7 @@ def all_leds_off(schema, midi):
                 note_id = int(control_node.split('=')[1])
                 midi.set_led_state(note_id, False)
 
-def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, auto_snap_event, schema):
+def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, auto_snap_event, schema, image_queue, ui_queue):
     # clear any stray events in the queue
     midi.clear_events()
     if jubilee.motors_off():
@@ -681,11 +695,29 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
     rotation_changed = False
     last_rotation_value = 0.0
     new_rotation_value = 0.0
+    piezo_changed = False
+    last_piezo_value = 0.0
+    new_piezo_value = 0.0
 
     while True:
         if cam_quit.is_set():
             all_leds_off(schema, midi)
             return
+
+        if False:       
+            # Placeholder for IPC piezo code
+            try:
+                image = image_queue.get(block=False)
+            except queue.Empty:
+                pass
+            else:
+                if not ui_queue.full():
+                    ui_queue.put(
+                        cv2.resize(image, None, None, 0.2, 0.2)
+                    )
+                pass
+
+        # Hardware control loop
         msg = midi.midi.poll()
         if msg is None:
             # Only update the motor value after the controller is stable for one cycle
@@ -706,6 +738,13 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                     jubilee.set_rotation(r)
                     rotation_changed = False
                 last_rotation_value = new_rotation_value
+            if piezo_changed:
+                if new_piezo_value == last_piezo_value:
+                    nudge = float(new_piezo_value) * (MAX_PIEZO / 127.0)
+                    piezo.set_code(int(nudge))
+                    piezo_changed = False
+                last_piezo_value = new_piezo_value
+
             time.sleep(0) # yield our quantum
             continue
         # hugely inefficient O(n) search on every iter, but "meh"
@@ -741,8 +780,8 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                         bright = float(control_value) * (MAX_LIGHT / 127.0)
                         light.set_intensity_remote(int(bright))
                     elif name == "nudge-piezo":
-                        nudge = float(control_value) * (MAX_PIEZO / 127.0)
-                        piezo.set_code(int(nudge))
+                        piezo_changed = True
+                        new_piezo_value = float(control_value)
                     elif name == "gamma":
                         last_gamma = (float(control_value) / 127.0) * MAX_GAMMA
                         if gamma_enabled:
@@ -1157,8 +1196,10 @@ def main():
     image_name.rep = args.reps
     auto_snap_event = Event()
     auto_snap_done = Event()
+    image_queue = queue.Queue(maxsize=2) # don't buffer too many frames
+    ui_queue = queue.Queue(maxsize=2)
     if not args.no_cam:
-        c = Thread(target=cam, args=[cam_quit, gamma, image_name, auto_snap_event, auto_snap_done])
+        c = Thread(target=cam, args=[cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, image_queue, ui_queue])
         c.start()
 
     numeric_level = getattr(logging, args.loglevel.upper(), None)
@@ -1251,7 +1292,7 @@ def main():
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
                     q.start()
                     l = Thread(target=loop, args=[
-                        args, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema
+                        args, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema, image_queue, ui_queue
                     ])
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion
