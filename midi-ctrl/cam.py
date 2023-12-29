@@ -1,7 +1,10 @@
 import sys, toupcam, logging
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, QTimer, QSignalBlocker, Qt, QRect
 from PyQt5.QtGui import QPixmap, QImage
-from PyQt5.QtWidgets import QLabel, QApplication, QWidget, QDesktopWidget, QCheckBox, QMessageBox, QMainWindow, QPushButton, QComboBox, QSlider, QGroupBox, QGridLayout, QBoxLayout, QHBoxLayout, QVBoxLayout, QMenu, QAction
+from PyQt5.QtWidgets import QLabel, QApplication, QWidget, QDesktopWidget, \
+    QCheckBox, QMessageBox, QMainWindow, QPushButton, QComboBox, QSlider, QGroupBox, \
+    QGridLayout, QBoxLayout, QHBoxLayout, QVBoxLayout, QMenu, QAction, QSpinBox, \
+    QFormLayout, QGraphicsProxyWidget, QGraphicsScene, QGraphicsView
 
 import numpy as np
 import qimage2ndarray
@@ -15,6 +18,13 @@ import os
 import cv2
 envpath = '/home/bunnie/.local/lib/python3.10/site-packages/cv2/qt/plugins/platforms'
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = envpath
+
+from collections import deque
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from math import log10
+
+DEFAULT_LAPLACIAN = 11
 
 def adjust_gamma(image, gamma=1.0):
 	# build a lookup table mapping the pixel values [0, 255] to
@@ -61,6 +71,8 @@ class MainWindow(QMainWindow):
         self.image_queue = None # this must be initialized to a Queue for image queuing code to run
         self.ui_queue = None
         self.oneshot_expo_print = False
+        self.laplacian = DEFAULT_LAPLACIAN
+        self.focus_scores = deque([0] * 16, maxlen=16)
 
         #gbox_res = QGroupBox("Resolution")
         #self.cmb_res = QComboBox()
@@ -123,17 +135,39 @@ class MainWindow(QMainWindow):
         self.btn_snap.setEnabled(False)
         self.btn_snap.clicked.connect(self.onBtnSnap)
 
+        adjustment_fields_layout = QFormLayout()
+        self.laplacian_spin = QSpinBox()
+        self.laplacian_spin.setValue(DEFAULT_LAPLACIAN)
+        adjustment_fields_layout.addRow("Laplacian: ", self.laplacian_spin)
+        self.laplacian_spin.valueChanged.connect(self.onLaplacian)
+
         self.lbl_frame = QLabel()
 
+        # build a matplotlib graph area
+        self.figure = Figure()
+        self.canvas = FigureCanvas(self.figure)
+        self.ax = self.figure.add_subplot()
+        self.lines, = self.ax.plot([], [], lw=2)
+        self.lines.set_xdata(np.arange(len(self.focus_scores)))
+        proxy_widget = QGraphicsProxyWidget()
+        proxy_widget.setWidget(self.canvas)
+        scene = QGraphicsScene()
+        scene.addItem(proxy_widget)
+        view = QGraphicsView(scene)
+
+        # assemble the control panel horizontally
         hlyt_ctrl = QHBoxLayout()
         #hlyt_ctrl.addWidget(gbox_res)
         hlyt_ctrl.addWidget(gbox_exp)
         hlyt_ctrl.addWidget(gbox_wb)
+        hlyt_ctrl.addLayout(adjustment_fields_layout)
         hlyt_ctrl.addWidget(self.btn_open)
         hlyt_ctrl.addWidget(self.btn_snap)
+        hlyt_ctrl.addWidget(view)
         hlyt_ctrl.addStretch()
         wg_ctrl = QWidget()
         wg_ctrl.setLayout(hlyt_ctrl)
+        wg_ctrl.setMinimumHeight(500)
 
         # Place overview and preview in the same V-box
         self.lbl_video = QLabel()
@@ -146,7 +180,7 @@ class MainWindow(QMainWindow):
         self.v_video = v_video
 
         grid_main = QGridLayout()
-        grid_main.setRowStretch(0, 10) # video is on row 0, have it try to be as big as possible
+        grid_main.setRowStretch(0, 4) # video is on row 0, have it try to be as big as possible
         grid_main.addWidget(v_widget)
         grid_main.addWidget(self.lbl_frame, 1, 0) # optional?
         grid_main.addWidget(wg_ctrl, 3, 0)
@@ -156,6 +190,10 @@ class MainWindow(QMainWindow):
 
         self.timer.timeout.connect(self.onTimer)
         self.evtCallback.connect(self.onevtCallback)
+
+   
+    def onLaplacian(self, value):
+        self.laplacian = value
 
     def onTimer(self):
         if self.hcam:
@@ -364,19 +402,35 @@ class MainWindow(QMainWindow):
             pass
         else:
             image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGBX8888)
-            if self.image_queue is not None:
-                if not self.image_queue.full():
-                    cv2_image = qimage2ndarray.rgb_view(image)
-                    self.image_queue.put(cv2_image)
-                else:
-                    logging.debug("Image queue overflow, image dropped")
-            if self.ui_queue is not None:
-                try:
-                    ui_img = self.ui_queue.get(block=False)
-                except queue.Empty:
-                    pass
-                else:
-                    cv2.imshow("focus", ui_img)
+
+            if False:
+                if self.image_queue is not None:
+                    if not self.image_queue.full():
+                        cv2_image = qimage2ndarray.rgb_view(image)
+                        self.image_queue.put(cv2_image)
+                    else:
+                        logging.debug("Image queue overflow, image dropped")
+                if self.ui_queue is not None:
+                    try:
+                        ui_img = self.ui_queue.get(block=False)
+                    except queue.Empty:
+                        pass
+                    else:
+                        cv2.imshow("focus", ui_img)
+
+            # TODO: run laplacian only on the viewed area :-/  should speed things up
+            cv2_image = qimage2ndarray.rgb_view(image)
+            norm = cv2.normalize(cv2_image, None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+            laplacian = cv2.Laplacian(norm, -1, ksize=self.laplacian)
+            self.focus_scores.popleft() # remove an old entry
+            self.focus_scores.append(log10(laplacian.var()))  # add a new one
+
+            # TODO: figure out why this gets so enormously slow once the main loop begins...
+            # maybe just hand-code up something using opencv, it's just a friggin line chart...
+            self.lines.set_ydata(list(self.focus_scores))
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.canvas.draw()
 
             # extract bounds of the original image (before OpenCV processing)
             qr = image.rect()

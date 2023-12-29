@@ -42,9 +42,6 @@ import math
 import iqmotion as iq
 
 import os
-import cv2
-envpath = '/home/bunnie/.local/lib/python3.10/site-packages/cv2/qt/plugins/platforms'
-os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = envpath
 
 SERIAL_NO_LED   = 'FTCYSOO2'
 SERIAL_NO_PIEZO = 'FTCYSQ4J'
@@ -703,19 +700,6 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
         if cam_quit.is_set():
             all_leds_off(schema, midi)
             return
-
-        if False:       
-            # Placeholder for IPC piezo code
-            try:
-                image = image_queue.get(block=False)
-            except queue.Empty:
-                pass
-            else:
-                if not ui_queue.full():
-                    ui_queue.put(
-                        cv2.resize(image, None, None, 0.2, 0.2)
-                    )
-                pass
 
         # Hardware control loop
         msg = midi.midi.poll()
