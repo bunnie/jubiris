@@ -59,7 +59,6 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(2000, 2000)
         self.image_name = None
         self.hcam = None
         self.timer = QTimer(self)
@@ -368,7 +367,7 @@ class MainWindow(QMainWindow):
 
             # set some defaults
             INIT_EXPO_TIME=160_000
-            INIT_EXPO_GAIN=300
+            INIT_EXPO_GAIN=100
             INIT_TEMP=6325
             INIT_TINT=1907
             self.slider_temp.setValue(INIT_TEMP)
