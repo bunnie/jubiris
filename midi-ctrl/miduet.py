@@ -41,7 +41,7 @@ import math
 
 import iqmotion as iq
 
-import os
+from datetime import datetime
 
 SERIAL_NO_LED   = 'FTCYSOO2'
 SERIAL_NO_PIEZO = 'FTCYSQ4J'
@@ -656,7 +656,7 @@ def all_leds_off(schema, midi):
                 note_id = int(control_node.split('=')[1])
                 midi.set_led_state(note_id, False)
 
-def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, auto_snap_event, schema, image_queue, ui_queue):
+def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_queue):
     # clear any stray events in the queue
     midi.clear_events()
     if jubilee.motors_off():
@@ -696,7 +696,10 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
     last_piezo_value = 0.0
     new_piezo_value = 0.0
 
+    profiling = False
     while True:
+        if profiling:
+            start = datetime.now()
         if cam_quit.is_set():
             all_leds_off(schema, midi)
             return
@@ -729,7 +732,9 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                     piezo_changed = False
                 last_piezo_value = new_piezo_value
 
-            time.sleep(0) # yield our quantum
+            if profiling:
+                logging.info(f"poll {datetime.now() - start}")
+            time.sleep(0.01) # yield our quantum
             continue
         # hugely inefficient O(n) search on every iter, but "meh"
         # that's why we have Moore's law.
@@ -1030,6 +1035,8 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                     refvals[name] = None
                             paused_axis = None
         
+        if profiling:
+            logging.info(f"parse {datetime.now() - start}")
         # now update machine position based on values
         if valid:
             for (name, val) in curvals.items():
@@ -1180,10 +1187,9 @@ def main():
     image_name.rep = args.reps
     auto_snap_event = Event()
     auto_snap_done = Event()
-    image_queue = queue.Queue(maxsize=2) # don't buffer too many frames
-    ui_queue = queue.Queue(maxsize=2)
+    focus_score = queue.Queue(maxsize=1) # don't buffer too many frames
     if not args.no_cam:
-        c = Thread(target=cam, args=[cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, image_queue, ui_queue])
+        c = Thread(target=cam, args=[cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_score])
         c.start()
 
     numeric_level = getattr(logging, args.loglevel.upper(), None)
@@ -1276,7 +1282,7 @@ def main():
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
                     q.start()
                     l = Thread(target=loop, args=[
-                        args, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema, image_queue, ui_queue
+                        args, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_score
                     ])
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion

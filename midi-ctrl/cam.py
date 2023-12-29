@@ -1,10 +1,10 @@
 import sys, toupcam, logging
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, QTimer, QSignalBlocker, Qt, QRect
-from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor
 from PyQt5.QtWidgets import QLabel, QApplication, QWidget, QDesktopWidget, \
     QCheckBox, QMessageBox, QMainWindow, QPushButton, QComboBox, QSlider, QGroupBox, \
     QGridLayout, QBoxLayout, QHBoxLayout, QVBoxLayout, QMenu, QAction, QSpinBox, \
-    QFormLayout, QGraphicsProxyWidget, QGraphicsScene, QGraphicsView
+    QFormLayout
 
 import numpy as np
 import qimage2ndarray
@@ -20,11 +20,13 @@ envpath = '/home/bunnie/.local/lib/python3.10/site-packages/cv2/qt/plugins/platf
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = envpath
 
 from collections import deque
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
 from math import log10
+from datetime import datetime
 
-DEFAULT_LAPLACIAN = 11
+DEFAULT_LAPLACIAN = 5 # this gets multiplied by 2 and 1 added to ensure the result is odd
+FOCUS_AREA_PX = 1536
+GRAPH_WINDOW = 50
+USE_GAMMA = False
 
 def adjust_gamma(image, gamma=1.0):
 	# build a lookup table mapping the pixel values [0, 255] to
@@ -68,11 +70,13 @@ class MainWindow(QMainWindow):
         self.temp = toupcam.TOUPCAM_TEMP_DEF
         self.tint = toupcam.TOUPCAM_TINT_DEF
         self.count = 0
-        self.image_queue = None # this must be initialized to a Queue for image queuing code to run
-        self.ui_queue = None
+        self.focus_queue = None # this must be initialized to a Queue for image queuing code to run
         self.oneshot_expo_print = False
         self.laplacian = DEFAULT_LAPLACIAN
-        self.focus_scores = deque([0] * 16, maxlen=16)
+        self.focus_scores = deque([0] * GRAPH_WINDOW, maxlen=GRAPH_WINDOW)
+        # track values a little beyond the graph window so we "average in" to new zoom scales
+        self.min_y_window = deque([1e50] * int(GRAPH_WINDOW * 1.1), maxlen=int(GRAPH_WINDOW * 1.1))
+        self.max_y_window = deque([0.0] * int(GRAPH_WINDOW * 1.1), maxlen=int(GRAPH_WINDOW * 1.1))
 
         #gbox_res = QGroupBox("Resolution")
         #self.cmb_res = QComboBox()
@@ -143,17 +147,8 @@ class MainWindow(QMainWindow):
 
         self.lbl_frame = QLabel()
 
-        # build a matplotlib graph area
-        self.figure = Figure()
-        self.canvas = FigureCanvas(self.figure)
-        self.ax = self.figure.add_subplot()
-        self.lines, = self.ax.plot([], [], lw=2)
-        self.lines.set_xdata(np.arange(len(self.focus_scores)))
-        proxy_widget = QGraphicsProxyWidget()
-        proxy_widget.setWidget(self.canvas)
-        scene = QGraphicsScene()
-        scene.addItem(proxy_widget)
-        view = QGraphicsView(scene)
+        # build a graph area
+        self.graph = QLabel()
 
         # assemble the control panel horizontally
         hlyt_ctrl = QHBoxLayout()
@@ -163,7 +158,7 @@ class MainWindow(QMainWindow):
         hlyt_ctrl.addLayout(adjustment_fields_layout)
         hlyt_ctrl.addWidget(self.btn_open)
         hlyt_ctrl.addWidget(self.btn_snap)
-        hlyt_ctrl.addWidget(view)
+        hlyt_ctrl.addWidget(self.graph)
         hlyt_ctrl.addStretch()
         wg_ctrl = QWidget()
         wg_ctrl.setLayout(hlyt_ctrl)
@@ -191,6 +186,58 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.onTimer)
         self.evtCallback.connect(self.onevtCallback)
 
+    def get_laplacian(self):
+        return self.laplacian * 2 + 1
+    
+    def draw_graph(self, data, w=800, h=500):
+        MARGIN = 0.1
+        canvas = np.full((h, w, 3), 255, dtype=np.uint8)
+        min_y = min(data)
+        self.min_y_window.popleft()
+        self.min_y_window.append(min_y)
+        max_y = max(data)
+        self.max_y_window.popleft()
+        self.max_y_window.append(max_y)
+
+        min_y = min(self.min_y_window)
+        max_y = max(self.max_y_window)
+        if max_y == min_y:
+            max_y = min_y + 1 # just prevent numeric overflow on divide
+
+        scale = (h * (1 - MARGIN * 2)) / (max_y - min_y)
+        offset = MARGIN * h
+        x_tick = w * (1 - MARGIN * 2) / (len(data) + 1)
+
+        last_x = w * MARGIN
+        last_y = h - (offset + (data[0] - min_y) * scale)
+        thickness = 2
+        color = (180, 40, 60)
+        for y in data[1:]:
+            cur_x = last_x + x_tick
+            cur_y = h - (offset + (y - min_y) * scale)
+            cv2.line(canvas, (int(last_x), int(last_y)), (int(cur_x), int(cur_y)), color, thickness)
+            last_x = cur_x
+            last_y = cur_y
+        # add legends for Y-axis
+        cv2.putText(
+            canvas,
+            f"{min_y:0.2f}",
+            (int(offset), int(h-offset)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            2.0,
+            (128, 128, 128),
+            bottomLeftOrigin = False,
+        )
+        cv2.putText(
+            canvas,
+            f"{max_y:0.2f}",
+            (int(offset), int(offset*2)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            2.0,
+            (128, 128, 128),
+            bottomLeftOrigin = False,
+        )
+        return canvas
    
     def onLaplacian(self, value):
         self.laplacian = value
@@ -401,36 +448,11 @@ class MainWindow(QMainWindow):
         except toupcam.HRESULTException:
             pass
         else:
+            profiling = False
+            if profiling:
+                start = datetime.now()
+
             image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGBX8888)
-
-            if False:
-                if self.image_queue is not None:
-                    if not self.image_queue.full():
-                        cv2_image = qimage2ndarray.rgb_view(image)
-                        self.image_queue.put(cv2_image)
-                    else:
-                        logging.debug("Image queue overflow, image dropped")
-                if self.ui_queue is not None:
-                    try:
-                        ui_img = self.ui_queue.get(block=False)
-                    except queue.Empty:
-                        pass
-                    else:
-                        cv2.imshow("focus", ui_img)
-
-            # TODO: run laplacian only on the viewed area :-/  should speed things up
-            cv2_image = qimage2ndarray.rgb_view(image)
-            norm = cv2.normalize(cv2_image, None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-            laplacian = cv2.Laplacian(norm, -1, ksize=self.laplacian)
-            self.focus_scores.popleft() # remove an old entry
-            self.focus_scores.append(log10(laplacian.var()))  # add a new one
-
-            # TODO: figure out why this gets so enormously slow once the main loop begins...
-            # maybe just hand-code up something using opencv, it's just a friggin line chart...
-            self.lines.set_ydata(list(self.focus_scores))
-            self.ax.relim()
-            self.ax.autoscale_view()
-            self.canvas.draw()
 
             # extract bounds of the original image (before OpenCV processing)
             qr = image.rect()
@@ -451,38 +473,84 @@ class MainWindow(QMainWindow):
             # newimage = image.scaledToHeight(target_height, Qt.FastTransformation)
 
             # gamma adjust - run this on the down-scaled image, our CPU is not fast enough to handle 4K
-            if self.gamma.gamma == 1.0:
-                # bypass computations if it's 1.0
-                self.lbl_video.setPixmap(QPixmap.fromImage(newimage))
+            if USE_GAMMA: # turn off gamma for now - we need the performance to do the focus routine, and we haven't used gamma in a while
+                if self.gamma.gamma == 1.0:
+                    # bypass computations if it's 1.0
+                    self.lbl_video.setPixmap(QPixmap.fromImage(newimage))
+                else:
+                    gammaimage = qimage2ndarray.array2qimage(
+                        adjust_gamma(qimage2ndarray.rgb_view(newimage), self.gamma.gamma))
+                    self.lbl_video.setPixmap(QPixmap.fromImage(
+                        gammaimage.copy(QRect(0, 0, newimage_bounds.width(), newimage_bounds.height()))
+                    ))
             else:
-                gammaimage = qimage2ndarray.array2qimage(
-                    adjust_gamma(qimage2ndarray.rgb_view(newimage), self.gamma.gamma))
-                self.lbl_video.setPixmap(QPixmap.fromImage(
-                    gammaimage.copy(QRect(0, 0, newimage_bounds.width(), newimage_bounds.height()))
-                ))
+                self.lbl_video.setPixmap(QPixmap.fromImage(newimage))
 
-            # extract a full-res preview image of the centroid
+            # extract a full-res preview image of the focus area
             w = qr.width()
             h = qr.height()
-            dest_w = self.lbl_fullres.width()
-            dest_h = self.lbl_fullres.height()
-
-            # handle case of screen res higher than source image
-            if dest_w > w:
-                dest_w = w
-            if dest_h > h:
-                dest_h = h
-            crop_rect = QRect(w//2 - dest_w//2, h//2 - dest_h//2, w//2 + dest_w//2, h//2 + dest_h//2)
-            centerimage = image.copy(crop_rect)
+            #focus_rect = QRect(w//2 - FOCUS_AREA_PX//2, h//2 - FOCUS_AREA_PX//2, w//2 + FOCUS_AREA_PX//2, h//2 + FOCUS_AREA_PX//2)
+            centerimage = image.copy(w//2 - FOCUS_AREA_PX//2, h//2 - FOCUS_AREA_PX//2, FOCUS_AREA_PX, FOCUS_AREA_PX)
             centerimage_rect = centerimage.rect()
-            if self.gamma.gamma == 1.0:
-                self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
+
+            # add focus rectangle mark
+            # painter = QPainter(centerimage)
+            # painter.setPen(QPen(QColor(128, 255, 128)))
+            # painter.drawRect(focus_rect)
+            # painter.end()
+
+            if USE_GAMMA:
+                if self.gamma.gamma == 1.0:
+                    self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
+                else:
+                    gamma_centerimage = qimage2ndarray.array2qimage(
+                        adjust_gamma(qimage2ndarray.rgb_view(centerimage), self.gamma.gamma))
+                    self.lbl_fullres.setPixmap(QPixmap.fromImage(
+                        gamma_centerimage.copy(QRect(0, 0, centerimage_rect.width(), centerimage_rect.height()))
+                        ))
             else:
-                gamma_centerimage = qimage2ndarray.array2qimage(
-                    adjust_gamma(qimage2ndarray.rgb_view(centerimage), self.gamma.gamma))
-                self.lbl_fullres.setPixmap(QPixmap.fromImage(
-                    gamma_centerimage.copy(QRect(0, 0, centerimage_rect.width(), centerimage_rect.height()))
-                    ))
+                self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
+
+            if profiling:
+                logging.info(f"before: {datetime.now() - start}")
+                start = datetime.now()
+            # autofocus mechanisms
+            if False:
+                if self.image_queue is not None:
+                    if not self.image_queue.full():
+                        cv2_image = qimage2ndarray.rgb_view(image)
+                        self.image_queue.put(cv2_image)
+                    else:
+                        logging.debug("Image queue overflow, image dropped")
+                if self.ui_queue is not None:
+                    try:
+                        ui_img = self.ui_queue.get(block=False)
+                    except queue.Empty:
+                        pass
+                    else:
+                        cv2.imshow("focus", ui_img)
+
+            cv2_image = qimage2ndarray.rgb_view(centerimage)
+            filtered = cv2.medianBlur(cv2_image, self.get_laplacian())
+            norm = cv2.normalize(filtered, None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+            laplacian = cv2.Laplacian(norm, -1, ksize=self.get_laplacian())
+            self.focus_scores.popleft()
+            try:
+                self.focus_scores.append(log10(abs(laplacian.var())))
+            except ValueError:
+                logging.info("Laplacian had 0 variance, inserting bogus value for focus")
+                self.focus_scores.append(0)
+            if profiling:
+                logging.info(f"laplacian: {datetime.now() - start}")
+                start = datetime.now()
+
+            graph = self.draw_graph(list(self.focus_scores))
+            self.graph.setPixmap(QPixmap.fromImage(
+                QImage(graph, graph.shape[1], graph.shape[0], graph.shape[1] * 3, QImage.Format_RGB888)
+            ))
+            if profiling:
+                logging.info(f"graph: {datetime.now() - start}")
+
 
     def handleExpoEvent(self):
         return
@@ -593,16 +661,16 @@ def snapper(w, image_name, auto_snap_event, auto_snap_done):
         auto_snap_done.set()
 
 
-def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, image_queue, ui_queue):
+def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queue):
     app = QApplication(sys.argv)
     w = MainWindow()
+    w.setGeometry(50, 500, 2200, 3000)
     w.show()
     w.gamma = gamma
     # auto-open the camera on boot
     w.btn_open.click()
     w.single_snap_done = Event()
-    w.image_queue = image_queue
-    w.ui_queue = ui_queue
+    w.focus_queue = focus_queue
 
     # Run a thread to forward/manage snapshotting events
     b = Thread(target=snapper, args=[w, image_name, auto_snap_event, auto_snap_done])
