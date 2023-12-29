@@ -71,19 +71,10 @@ class MainWindow(QMainWindow):
         self.count = 0
         self.focus_queue = None # this must be initialized to a Queue for image queuing code to run
         self.oneshot_expo_print = False
-        self.laplacian = DEFAULT_LAPLACIAN
         self.focus_scores = deque([0] * GRAPH_WINDOW, maxlen=GRAPH_WINDOW)
         # track values a little beyond the graph window so we "average in" to new zoom scales
         self.min_y_window = deque([1e50] * int(GRAPH_WINDOW * 1.1), maxlen=int(GRAPH_WINDOW * 1.1))
         self.max_y_window = deque([0.0] * int(GRAPH_WINDOW * 1.1), maxlen=int(GRAPH_WINDOW * 1.1))
-
-        #gbox_res = QGroupBox("Resolution")
-        #self.cmb_res = QComboBox()
-        #self.cmb_res.setEnabled(False)
-        #vlyt_res = QVBoxLayout()
-        #vlyt_res.addWidget(self.cmb_res)
-        #gbox_res.setLayout(vlyt_res)
-        #self.cmb_res.currentIndexChanged.connect(self.onResolutionChanged)
 
         gbox_exp = QGroupBox("Exposure")
         self.cbox_auto = QCheckBox()
@@ -99,8 +90,8 @@ class MainWindow(QMainWindow):
         self.lbl_expoGain = QLabel("0")
         self.slider_expoTime = QSlider(Qt.Horizontal)
         self.slider_expoGain = QSlider(Qt.Horizontal)
-        self.slider_expoTime.setEnabled(False)
-        self.slider_expoGain.setEnabled(False)
+        self.slider_expoTime.setEnabled(True)
+        self.slider_expoGain.setEnabled(True)
         vlyt_exp = QVBoxLayout()
         vlyt_exp.addLayout(hlyt_auto)
         vlyt_exp.addLayout(self.makeLayout(lbl_time, self.slider_expoTime, self.lbl_expoTime, lbl_gain, self.slider_expoGain, self.lbl_expoGain))
@@ -141,8 +132,29 @@ class MainWindow(QMainWindow):
         adjustment_fields_layout = QFormLayout()
         self.laplacian_spin = QSpinBox()
         self.laplacian_spin.setValue(DEFAULT_LAPLACIAN)
+        self.filter_spin = QSpinBox()
+        self.filter_spin.setValue(DEFAULT_LAPLACIAN)
+        self.filter_cbox = QCheckBox()
+        self.filter_cbox.setChecked(True)
+        self.preview_cbox = QCheckBox()
+        self.preview_cbox.setChecked(True)
+        self.normalize_cbox = QCheckBox()
+        self.normalize_cbox.setChecked(True)
         adjustment_fields_layout.addRow("Laplacian: ", self.laplacian_spin)
+        adjustment_fields_layout.addRow("Filter: ", self.filter_spin)
+        adjustment_fields_layout.addRow("Filter Enable: ", self.filter_cbox)
+        adjustment_fields_layout.addRow("Normalize Enable: ", self.normalize_cbox)
+        adjustment_fields_layout.addRow("Raw Preview: ", self.preview_cbox)
+        self.laplacian = DEFAULT_LAPLACIAN
         self.laplacian_spin.valueChanged.connect(self.onLaplacian)
+        self.filter_value = DEFAULT_LAPLACIAN
+        self.filter_spin.valueChanged.connect(self.onFilterValue)
+        self.filter_enable = True
+        self.filter_cbox.stateChanged.connect(self.onFilterState)
+        self.raw_preview_enable = True
+        self.preview_cbox.stateChanged.connect(self.onPreviewState)
+        self.normalize_enable = True
+        self.normalize_cbox.stateChanged.connect(self.onNormalizeState)
 
         self.lbl_frame = QLabel()
 
@@ -185,8 +197,21 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.onTimer)
         self.evtCallback.connect(self.onevtCallback)
 
+    # these must be odd numbers, so we wrap them in a function to ensure that
     def get_laplacian(self):
         return self.laplacian * 2 + 1
+    def get_filter_value(self):
+        return self.filter_value * 2 + 1
+    def onLaplacian(self, value):
+        self.laplacian = value
+    def onFilterValue(self, value):
+        self.filter_value = value
+    def onFilterState(self, state):
+        self.filter_enable = state
+    def onPreviewState(self, state):
+        self.raw_preview_enable = state
+    def onNormalizeState(self, state):
+        self.normalize_enable = state
     
     def draw_graph(self, data, w=800, h=500):
         MARGIN = 0.1
@@ -238,9 +263,6 @@ class MainWindow(QMainWindow):
         )
         return canvas
    
-    def onLaplacian(self, value):
-        self.laplacian = value
-
     def onTimer(self):
         if self.hcam:
             nFrame, nTime, nTotalFrame = self.hcam.get_FrameRate()
@@ -488,7 +510,6 @@ class MainWindow(QMainWindow):
             # extract a full-res preview image of the focus area
             w = qr.width()
             h = qr.height()
-            #focus_rect = QRect(w//2 - FOCUS_AREA_PX//2, h//2 - FOCUS_AREA_PX//2, w//2 + FOCUS_AREA_PX//2, h//2 + FOCUS_AREA_PX//2)
             centerimage = image.copy(w//2 - FOCUS_AREA_PX//2, h//2 - FOCUS_AREA_PX//2, FOCUS_AREA_PX, FOCUS_AREA_PX)
             centerimage_rect = centerimage.rect()
 
@@ -497,18 +518,6 @@ class MainWindow(QMainWindow):
             # painter.setPen(QPen(QColor(128, 255, 128)))
             # painter.drawRect(focus_rect)
             # painter.end()
-
-            if USE_GAMMA:
-                if self.gamma.gamma == 1.0:
-                    self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
-                else:
-                    gamma_centerimage = qimage2ndarray.array2qimage(
-                        adjust_gamma(qimage2ndarray.rgb_view(centerimage), self.gamma.gamma))
-                    self.lbl_fullres.setPixmap(QPixmap.fromImage(
-                        gamma_centerimage.copy(QRect(0, 0, centerimage_rect.width(), centerimage_rect.height()))
-                        ))
-            else:
-                self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
 
             if profiling:
                 logging.info(f"before: {datetime.now() - start}")
@@ -530,9 +539,11 @@ class MainWindow(QMainWindow):
                         cv2.imshow("focus", ui_img)
 
             cv2_image = qimage2ndarray.rgb_view(centerimage)
-            filtered = cv2.medianBlur(cv2_image, self.get_laplacian())
-            norm = cv2.normalize(filtered, None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-            laplacian = cv2.Laplacian(norm, -1, ksize=self.get_laplacian())
+            if self.filter_enable:
+                cv2_image = cv2.medianBlur(cv2_image, self.get_filter_value())
+            if self.normalize_enable:
+                cv2_image = cv2.normalize(cv2_image, None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+            laplacian = cv2.Laplacian(cv2_image, -1, ksize=self.get_laplacian())
             self.focus_scores.popleft()
             try:
                 self.focus_scores.append(log10(abs(laplacian.var())))
@@ -549,6 +560,23 @@ class MainWindow(QMainWindow):
             ))
             if profiling:
                 logging.info(f"graph: {datetime.now() - start}")
+
+            # update the image
+            if USE_GAMMA:
+                if self.gamma.gamma == 1.0:
+                    self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
+                else:
+                    gamma_centerimage = qimage2ndarray.array2qimage(
+                        adjust_gamma(qimage2ndarray.rgb_view(centerimage), self.gamma.gamma))
+                    self.lbl_fullres.setPixmap(QPixmap.fromImage(
+                        gamma_centerimage.copy(QRect(0, 0, centerimage_rect.width(), centerimage_rect.height()))
+                        ))
+            else:
+                if self.raw_preview_enable:
+                    self.lbl_fullres.setPixmap(QPixmap.fromImage(centerimage))
+                else:
+                    #lap_u8 = cv2.normalize(laplacian, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                    self.lbl_fullres.setPixmap(QPixmap.fromImage(qimage2ndarray.array2qimage(laplacian, normalize=True)))
 
 
     def handleExpoEvent(self):
