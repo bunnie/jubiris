@@ -23,7 +23,8 @@ from collections import deque
 from math import log10
 from datetime import datetime
 
-DEFAULT_LAPLACIAN = 5 # this gets multiplied by 2 and 1 added to ensure the result is odd
+DEFAULT_LAPLACIAN = 3 # this gets multiplied by 2 and 1 added to ensure the result is odd
+DEFAULT_FILTER = 5
 FOCUS_AREA_PX = 1536
 GRAPH_WINDOW = 50
 USE_GAMMA = False
@@ -73,8 +74,8 @@ class MainWindow(QMainWindow):
         self.oneshot_expo_print = False
         self.focus_scores = deque([0] * GRAPH_WINDOW, maxlen=GRAPH_WINDOW)
         # track values a little beyond the graph window so we "average in" to new zoom scales
-        self.min_y_window = deque([1e50] * int(GRAPH_WINDOW * 1.1), maxlen=int(GRAPH_WINDOW * 1.1))
-        self.max_y_window = deque([0.0] * int(GRAPH_WINDOW * 1.1), maxlen=int(GRAPH_WINDOW * 1.1))
+        self.min_y_window = deque([1e50] * int(GRAPH_WINDOW * 0.2), maxlen=int(GRAPH_WINDOW * 0.2))
+        self.max_y_window = deque([0.0] * int(GRAPH_WINDOW * 0.2), maxlen=int(GRAPH_WINDOW * 0.2))
 
         gbox_exp = QGroupBox("Exposure")
         self.cbox_auto = QCheckBox()
@@ -133,13 +134,13 @@ class MainWindow(QMainWindow):
         self.laplacian_spin = QSpinBox()
         self.laplacian_spin.setValue(DEFAULT_LAPLACIAN)
         self.filter_spin = QSpinBox()
-        self.filter_spin.setValue(DEFAULT_LAPLACIAN)
+        self.filter_spin.setValue(DEFAULT_FILTER)
         self.filter_cbox = QCheckBox()
         self.filter_cbox.setChecked(True)
         self.preview_cbox = QCheckBox()
         self.preview_cbox.setChecked(True)
         self.normalize_cbox = QCheckBox()
-        self.normalize_cbox.setChecked(True)
+        self.normalize_cbox.setChecked(False)
         adjustment_fields_layout.addRow("Laplacian: ", self.laplacian_spin)
         adjustment_fields_layout.addRow("Filter: ", self.filter_spin)
         adjustment_fields_layout.addRow("Filter Enable: ", self.filter_cbox)
@@ -147,13 +148,13 @@ class MainWindow(QMainWindow):
         adjustment_fields_layout.addRow("Raw Preview: ", self.preview_cbox)
         self.laplacian = DEFAULT_LAPLACIAN
         self.laplacian_spin.valueChanged.connect(self.onLaplacian)
-        self.filter_value = DEFAULT_LAPLACIAN
+        self.filter_value = DEFAULT_FILTER
         self.filter_spin.valueChanged.connect(self.onFilterValue)
         self.filter_enable = True
         self.filter_cbox.stateChanged.connect(self.onFilterState)
         self.raw_preview_enable = True
         self.preview_cbox.stateChanged.connect(self.onPreviewState)
-        self.normalize_enable = True
+        self.normalize_enable = False
         self.normalize_cbox.stateChanged.connect(self.onNormalizeState)
 
         self.lbl_frame = QLabel()
@@ -213,8 +214,9 @@ class MainWindow(QMainWindow):
     def onNormalizeState(self, state):
         self.normalize_enable = state
     
-    def draw_graph(self, data, w=800, h=500):
+    def draw_graph(self, data, w=500, h=500):
         MARGIN = 0.1
+        MIN_Y_RANGE = 0.035
         canvas = np.full((h, w, 3), 255, dtype=np.uint8)
         min_y = min(data)
         self.min_y_window.popleft()
@@ -225,8 +227,9 @@ class MainWindow(QMainWindow):
 
         min_y = min(self.min_y_window)
         max_y = max(self.max_y_window)
-        if max_y == min_y:
-            max_y = min_y + 1 # just prevent numeric overflow on divide
+        if max_y - min_y < MIN_Y_RANGE:
+            max_y = min_y + MIN_Y_RANGE / 2.0
+            min_y -= MIN_Y_RANGE / 3.0
 
         scale = (h * (1 - MARGIN * 2)) / (max_y - min_y)
         offset = MARGIN * h
@@ -245,21 +248,23 @@ class MainWindow(QMainWindow):
         # add legends for Y-axis
         cv2.putText(
             canvas,
-            f"{min_y:0.2f}",
+            f"{min_y:0.4f}",
             (int(offset), int(h-offset)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            2.0,
+            1.5,
             (128, 128, 128),
             bottomLeftOrigin = False,
+            thickness=2,
         )
         cv2.putText(
             canvas,
-            f"{max_y:0.2f}",
+            f"{max_y:0.4f}",
             (int(offset), int(offset*2)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            2.0,
+            1.5,
             (128, 128, 128),
             bottomLeftOrigin = False,
+            thickness=2,
         )
         return canvas
    
@@ -538,17 +543,19 @@ class MainWindow(QMainWindow):
                     else:
                         cv2.imshow("focus", ui_img)
 
-            cv2_image = qimage2ndarray.rgb_view(centerimage)
+            cv2_image = cv2.cvtColor(qimage2ndarray.rgb_view(centerimage), cv2.COLOR_RGB2GRAY)
             if self.filter_enable:
-                cv2_image = cv2.medianBlur(cv2_image, self.get_filter_value())
+                cv2_image = cv2.GaussianBlur(cv2_image, (self.get_filter_value(), self.get_filter_value()), 0)
+                # cv2_image = cv2.medianBlur(cv2_image, self.get_filter_value())
             if self.normalize_enable:
-                cv2_image = cv2.normalize(cv2_image, None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+                #cv2_image = cv2.normalize(cv2_image, None, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+                cv2_image = cv2.normalize(cv2_image, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
             laplacian = cv2.Laplacian(cv2_image, -1, ksize=self.get_laplacian())
             self.focus_scores.popleft()
             try:
                 self.focus_scores.append(log10(abs(laplacian.var())))
             except ValueError:
-                logging.info("Laplacian had 0 variance, inserting bogus value for focus")
+                logging.debug("Laplacian had 0 variance, inserting bogus value for focus")
                 self.focus_scores.append(0)
             if profiling:
                 logging.info(f"laplacian: {datetime.now() - start}")
