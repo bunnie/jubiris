@@ -1,0 +1,173 @@
+import logging
+import serial
+import time
+
+MAX_POI = 3
+MIN_ROTATION_ANGLE = -100.0
+MAX_ROTATION_ANGLE = 100.0
+CONTROL_MIN_ROTATION_ANGLE = -80.0 # somewhat not exactly degrees somehow...
+CONTROL_MAX_ROTATION_ANGLE = 80.0
+
+class Poi:
+    def __init__(self, x, y, z, piezo):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.piezo = piezo
+
+class Jubilee:
+    def __init__(self, port):
+        self.port = port
+        self.state = 'OFF'
+        try:
+            ser = serial.Serial(port, 115200, timeout = 1.0)
+            logging.debug("Duet3D serial port opened")
+            self.ser = ser
+            self.motors_off()
+            self.poi = [None] * MAX_POI # this is an array of POI objects
+        except serial.SerialException as e:
+            logging.error(f"Serial error: {e}")
+            return None
+    
+    def update_port(self, port):
+        self.port = port
+        try:
+            ser = serial.Serial(port, 115200, timeout = 1.0)
+            logging.info(f"Duet3D serial port updated to {port}")
+            self.ser = ser
+        except serial.SerialException as e:
+            logging.error(f"Serial error: {e}")
+            return None
+
+    def __enter__(self):
+        return self
+
+    def send_cmd(self, cmd, timeout=1.0):
+        cmd_bytes = bytes(cmd + '\n', 'utf-8')
+        logging.debug(str(cmd_bytes, 'utf-8'))
+        self.ser.write(cmd_bytes)
+        line = ''
+        timeout = True
+        while True:
+            c = self.ser.read(1)
+            if len(c) == 0:
+                break
+            line += c.decode('utf-8')
+            if 'ok\n' in line:
+                timeout = False
+                break
+
+        logging.debug(line)
+        return timeout
+
+    def step_axis(self, axis, step):
+        if not self.is_on():
+            return False # don't return an error, just silently fail
+        if step == 0.0:
+            return False
+
+        if 'x' in axis:
+            self.x += step
+        elif 'y' in axis:
+            self.y += step
+        elif 'z' in axis:
+            self.z += step
+        else:
+            print('axis not yet implemented')
+        return self.sync_to_mach()
+    
+    def get_rotation(self):
+        return self.r
+    
+    def set_rotation(self, degrees):
+        if self.is_on():
+            if degrees < MIN_ROTATION_ANGLE or degrees > MAX_ROTATION_ANGLE:
+                logging.error(f"requested rotation {degrees} is out of bounds, ignoring")
+                return None
+            self.r = degrees
+            return self.send_cmd(f'G1 V{self.r:0.2f} H4')  # terminates movement on endstop
+        else:
+            return None
+    
+    def goto(self, xyz_tuple):
+        if not self.is_on():
+            return False # don't return an error, just silently fail
+        (x, y, z) = xyz_tuple
+        self.x = x
+        self.y = y
+        self.z = z
+        return self.sync_to_mach()
+    
+    # takes our self.x/y/z and sends it to the machine. Also handles any global axis swapping
+    def sync_to_mach(self):
+        # NOTE axis swap is implemented at sync_to_mach
+        return self.send_cmd(f'G1 Y{self.x:0.2f} X{self.y:0.2f} Z{self.z:0.2f}')
+
+    def reset(self):
+        return self.send_cmd('M999')
+
+    def motors_off(self):
+        self.x = None
+        self.y = None
+        self.z = None
+        self.r = None
+        self.state = 'OFF'
+        return self.send_cmd('M18')
+    
+    def is_on(self):
+        return self.state == 'ON'
+    
+    def motors_on_set_zero(self):
+        self.send_cmd('G92 X0 Y0 Z10 U0 V0') # declare this position as origin
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 10.0
+        self.r = 0.0
+        self.send_cmd('G21') # millimeters
+        self.send_cmd('G90') # absolute
+        self.state = 'ON'
+
+    def estop(self):
+        self.send_cmd('M112')
+        self.x = None
+        self.y = None
+        self.z = None
+        self.state = 'ESTOP'
+    
+    def restart(self):
+        self.send_cmd('M999')
+        time.sleep(8) # enough time to boot?? TODO: there is probably a smarter way to watch for the boot condition
+        return self.send_cmd('M115')
+
+    def set_poi(self, index, piezo):
+        if not self.is_on():
+            return
+        # index should be a number from 1 through MAX_POI, inclusive
+        if index > MAX_POI or index == 0:
+            return
+        logging.debug(f"POI {index} set to {self.x}, {self.y}, {self.z}")
+        self.poi[index - 1] = Poi(self.x, self.y, self.z, piezo)
+
+    def recall_poi(self, index):
+        if not self.is_on():
+            return None
+        # index should be a number from 1 through MAX_POI, inclusive
+        if index > MAX_POI or index == 0:
+            return None
+        try:
+            poi = self.poi[index - 1]
+            self.x = poi.x
+            self.y = poi.y
+            self.z = poi.z
+        except AttributeError as e:
+            logging.debug(f"POI {index} has not been set")
+            return None
+        logging.debug(f"Recalling to POI {index}: {self.x}, {self.y}, {self.z}")
+        self.sync_to_mach()
+        return poi.piezo
+            
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.ser.is_open:
+            self.motors_off()
+            self.ser.close()
+            logging.debug("Serial port closed")
