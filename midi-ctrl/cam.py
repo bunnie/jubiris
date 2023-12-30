@@ -23,7 +23,7 @@ from collections import deque
 from math import log10
 from datetime import datetime
 
-from jubilee import Poi
+from piezo import PIEZO_UM_PER_LSB
 
 DEFAULT_LAPLACIAN_5X = 3 # this gets multiplied by 2 and 1 added to ensure the result is odd
 DEFAULT_FILTER_5X = 5
@@ -144,9 +144,13 @@ class MainWindow(QMainWindow):
         self.normalize_cbox.stateChanged.connect(self.onNormalizeState)
 
         # autofocus control
+        self.label_x = QLabel("0.0")
+        self.label_y = QLabel("0.0")
         self.label_z_offset = QLabel("0.0")
         self.label_piezo_offset = QLabel("0")
         autofocus_panel_layout = QFormLayout()
+        autofocus_panel_layout.addRow("X", self.label_x)
+        autofocus_panel_layout.addRow("Y", self.label_y)
         autofocus_panel_layout.addRow("Z-height", self.label_z_offset)
         autofocus_panel_layout.addRow("Piezo", self.label_piezo_offset)
 
@@ -520,8 +524,14 @@ class MainWindow(QMainWindow):
             # update machine state, if any available
             try:
                 poi = self.jubilee_state.get(block = False)
-                self.label_piezo_offset.setText(f"{poi.piezo}")
-                self.label_z_offset.setText(f"{poi.z:0.3f}")
+                if poi.piezo:
+                    self.label_piezo_offset.setText(f"{poi.piezo}({(poi.piezo * PIEZO_UM_PER_LSB):0.2f}um)")
+                if poi.z:
+                    self.label_z_offset.setText(f"{poi.z:0.2f}mm")
+                if poi.x:
+                    self.label_x.setText(f"{poi.x:0.2f}mm")
+                if poi.y:
+                    self.label_y.setText(f"{poi.y:0.2f}mm")
             except queue.Empty:
                 pass
 
