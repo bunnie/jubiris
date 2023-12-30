@@ -656,7 +656,7 @@ def all_leds_off(schema, midi):
                 note_id = int(control_node.split('=')[1])
                 midi.set_led_state(note_id, False)
 
-def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_queue):
+def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_queue):
     # clear any stray events in the queue
     midi.clear_events()
     if jubilee.motors_off():
@@ -878,20 +878,20 @@ def loop(args, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, a
                                 min_y = min([i.y for i in jubilee.poi])
                                 max_y = max([i.y for i in jubilee.poi])
 
-                                x_path = np.arange(min_x, max_x, args.stepsize)
+                                x_path = np.arange(min_x, max_x, stepsize)
                                 if len(x_path) == 0: # this happens if min == max
                                     x_path = [min_x]
                                 # make sure we include the end interval in the photo region
                                 if max(x_path) < max_x:
-                                    x_path = np.append(x_path, max(x_path) + args.stepsize)
+                                    x_path = np.append(x_path, max(x_path) + stepsize)
                                 # These fail due to floating point rounding errors :P
                                 # assert(max(x_path) >= max_x)
-                                y_path = np.arange(min_y, max_y, args.stepsize)
+                                y_path = np.arange(min_y, max_y, stepsize)
                                 if len(y_path) == 0: # handle min == max
                                     y_path = [min_y]
                                 # make sure we include the end interval in the photo region
                                 if max(y_path) < max_y:
-                                    y_path = np.append(y_path, max(y_path) + args.stepsize)
+                                    y_path = np.append(y_path, max(y_path) + stepsize)
                                 # assert(max(y_path) >= max_y)
 
                                 # derive Z-plane equation
@@ -1174,12 +1174,22 @@ def main():
         "--reps", required=False, type=int, default=1, help="Number of repetitions of shots of the current position"
     )
     parser.add_argument(
-        "--stepsize", required=False, type=float, default=0.1, help="Step size in mm for automation"
+        "--mag", required=False, type=int, default=10, help="Magnification", choices=[5, 10, 20]
     )
     parser.add_argument(
         "--settling", required=False, type=float, default=5.0, help="Settling time in seconds between steps"
     )
     args = parser.parse_args()
+
+    if args.mag == 5:
+        stepsize = 0.5
+    elif args.mag == 10:
+        stepsize = 0.3
+    elif args.mag == 20:
+        stepsize = 0.1
+    else:
+        logging.error("Magnification must be one of [5, 10, 20]")
+        exit(0)
 
     gamma = Gamma()
     image_name = ImageNamer()
@@ -1282,7 +1292,7 @@ def main():
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
                     q.start()
                     l = Thread(target=loop, args=[
-                        args, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_score
+                        args, stepsize, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_score
                     ])
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion

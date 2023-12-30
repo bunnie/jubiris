@@ -23,8 +23,15 @@ from collections import deque
 from math import log10
 from datetime import datetime
 
-DEFAULT_LAPLACIAN = 3 # this gets multiplied by 2 and 1 added to ensure the result is odd
-DEFAULT_FILTER = 5
+DEFAULT_LAPLACIAN_5X = 3 # this gets multiplied by 2 and 1 added to ensure the result is odd
+DEFAULT_FILTER_5X = 5
+DEFAULT_LAPLACIAN_10X = 5
+DEFAULT_FILTER_10X = 5 # I think the filter distance is about the same because we're looking to cancel out pixel noise, not feature noise
+DEFAULT_LAPLACIAN_20X = 7
+DEFAULT_FILTER_20X = 5
+DEFAULT_LAPLACIAN = None
+DEFAULT_FILTER = None
+
 FOCUS_AREA_PX = 1536
 GRAPH_WINDOW = 50
 USE_GAMMA = False
@@ -58,7 +65,18 @@ class MainWindow(QMainWindow):
         vlyt.addWidget(sli_2)
         return vlyt
 
-    def __init__(self):
+    def __init__(self, mag):
+        if mag == 5:
+            DEFAULT_FILTER = DEFAULT_FILTER_5X
+            DEFAULT_LAPLACIAN = DEFAULT_LAPLACIAN_5X
+        elif mag == 10:
+            DEFAULT_FILTER = DEFAULT_FILTER_10X
+            DEFAULT_LAPLACIAN = DEFAULT_LAPLACIAN_10X
+        elif mag == 20:
+            DEFAULT_FILTER = DEFAULT_FILTER_20X
+            DEFAULT_LAPLACIAN = DEFAULT_LAPLACIAN_20X
+            logging.warning("20x values are estimated and need tuning.")
+
         super().__init__()
         self.image_name = None
         self.hcam = None
@@ -695,9 +713,9 @@ def snapper(w, image_name, auto_snap_event, auto_snap_done):
         auto_snap_done.set()
 
 
-def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queue):
+def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queue, mag):
     app = QApplication(sys.argv)
-    w = MainWindow()
+    w = MainWindow(mag)
     w.setGeometry(50, 500, 2200, 3000)
     w.show()
     w.gamma = gamma
