@@ -1,6 +1,6 @@
 import sys, toupcam, logging
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, QTimer, QSignalBlocker, Qt, QRect
-from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor
+from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtWidgets import QLabel, QApplication, QWidget, QDesktopWidget, \
     QCheckBox, QMessageBox, QMainWindow, QPushButton, QComboBox, QSlider, QGroupBox, \
     QGridLayout, QBoxLayout, QHBoxLayout, QVBoxLayout, QMenu, QAction, QSpinBox, \
@@ -147,11 +147,14 @@ class MainWindow(QMainWindow):
         self.slider_temp.valueChanged.connect(self.onWBTemp)
         self.slider_tint.valueChanged.connect(self.onWBTint)
 
-        self.btn_open = QPushButton("Open")
-        self.btn_open.clicked.connect(self.onBtnOpen)
+        self.btn_quit = QPushButton("Quit")
+        self.btn_quit.clicked.connect(self.onBtnQuit)
         self.btn_snap = QPushButton("Snap")
         self.btn_snap.setEnabled(False)
         self.btn_snap.clicked.connect(self.onBtnSnap)
+        button_cluster = QVBoxLayout()
+        button_cluster.addWidget(self.btn_quit)
+        button_cluster.addWidget(self.btn_snap)
 
         adjustment_fields_layout = QFormLayout()
         self.laplacian_spin = QSpinBox()
@@ -191,8 +194,7 @@ class MainWindow(QMainWindow):
         hlyt_ctrl.addWidget(gbox_exp)
         hlyt_ctrl.addWidget(gbox_wb)
         hlyt_ctrl.addLayout(adjustment_fields_layout)
-        hlyt_ctrl.addWidget(self.btn_open)
-        hlyt_ctrl.addWidget(self.btn_snap)
+        hlyt_ctrl.addLayout(button_cluster)
         hlyt_ctrl.addWidget(self.graph)
         hlyt_ctrl.addStretch()
         wg_ctrl = QWidget()
@@ -302,7 +304,6 @@ class MainWindow(QMainWindow):
         self.hcam = None
         self.pData = None
 
-        self.btn_open.setText("Open")
         self.timer.stop()
         self.lbl_frame.clear()
         self.cbox_auto.setEnabled(False)
@@ -312,8 +313,6 @@ class MainWindow(QMainWindow):
         self.slider_temp.setEnabled(False)
         self.slider_tint.setEnabled(False)
         self.btn_snap.setEnabled(False)
-        #self.cmb_res.setEnabled(False)
-        #self.cmb_res.clear()
 
     def closeEvent(self, event):
         self.closeCamera()
@@ -390,9 +389,7 @@ class MainWindow(QMainWindow):
             self.slider_temp.setEnabled(True)
             self.slider_tint.setEnabled(True)
 
-            self.btn_open.setText("Quit")
             self.btn_snap.setEnabled(True)
-            # bAuto = self.hcam.get_AutoExpoEnable()
             self.cbox_auto.setChecked(False)
             self.btn_autoWB.setChecked(False)
             self.handleExpoEvent()
@@ -417,27 +414,28 @@ class MainWindow(QMainWindow):
             self.handleExpoEvent()
             self.handleTempTintEvent()
 
-    def onBtnOpen(self):
+    def onBtnQuit(self):
         if self.hcam:
             self.closeCamera()
-            self.close()
+        self.close()
+    
+    def setupCamera(self):
+        arr = toupcam.Toupcam.EnumV2()
+        if 0 == len(arr):
+            QMessageBox.warning(self, "Warning", "No camera found.")
+        elif 1 == len(arr):
+            self.cur = arr[0]
+            self.openCamera()
         else:
-            arr = toupcam.Toupcam.EnumV2()
-            if 0 == len(arr):
-                QMessageBox.warning(self, "Warning", "No camera found.")
-            elif 1 == len(arr):
-                self.cur = arr[0]
+            menu = QMenu()
+            for i in range(0, len(arr)):
+                action = QAction(arr[i].displayname, self)
+                action.setData(i)
+                menu.addAction(action)
+            action = menu.exec(self.mapToGlobal(self.btn_open.pos()))
+            if action:
+                self.cur = arr[action.data()]
                 self.openCamera()
-            else:
-                menu = QMenu()
-                for i in range(0, len(arr)):
-                    action = QAction(arr[i].displayname, self)
-                    action.setData(i)
-                    menu.addAction(action)
-                action = menu.exec(self.mapToGlobal(self.btn_open.pos()))
-                if action:
-                    self.cur = arr[action.data()]
-                    self.openCamera()
 
     def onBtnSnap(self):
         if self.hcam:
@@ -702,7 +700,7 @@ def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queu
     w.show()
     w.gamma = gamma
     # auto-open the camera on boot
-    w.btn_open.click()
+    w.setupCamera()
     w.single_snap_done = Event()
     w.focus_queue = focus_queue
 
