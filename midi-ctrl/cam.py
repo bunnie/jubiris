@@ -253,8 +253,9 @@ class MainWindow(QMainWindow):
         min_y = min(self.min_y_window)
         max_y = max(self.max_y_window)
         if max_y - min_y < MIN_Y_RANGE:
-            max_y = min_y + MIN_Y_RANGE / 2.0
-            min_y -= MIN_Y_RANGE / 3.0
+            delta = MIN_Y_RANGE - (max_y - min_y)
+            max_y += delta / 2.0
+            min_y -= delta / 2.0
 
         scale = (h * (1 - MARGIN * 2)) / (max_y - min_y)
         offset = MARGIN * h
