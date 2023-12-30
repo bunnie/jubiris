@@ -12,7 +12,7 @@ import qimage2ndarray
 from threading import Thread, Event
 import queue
 from pathlib import Path
-import time
+import statistics
 
 import os
 import cv2
@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.tint = toupcam.TOUPCAM_TINT_DEF
         self.count = 0
         self.focus_queue = None # this must be initialized to a Queue for image queuing code to run
+        self.fine_focus_event = None
         self.jubilee_state = None # This is a Queue that contains Poi records
         self.oneshot_expo_print = False
         self.focus_scores = deque([0] * GRAPH_WINDOW, maxlen=GRAPH_WINDOW)
@@ -106,12 +107,15 @@ class MainWindow(QMainWindow):
         self.spinbox_expoGain.valueChanged.connect(self.onExpoGain)
 
         # global state control buttons
-        self.btn_quit = QPushButton("Quit")
-        self.btn_quit.clicked.connect(self.onBtnQuit)
+        self.btn_fine_focus = QPushButton("Fine Focus")
+        self.btn_fine_focus.clicked.connect(self.onFineFocus)
         self.btn_snap = QPushButton("Snap")
         self.btn_snap.setEnabled(False)
         self.btn_snap.clicked.connect(self.onBtnSnap)
+        self.btn_quit = QPushButton("Quit")
+        self.btn_quit.clicked.connect(self.onBtnQuit)
         button_cluster = QVBoxLayout()
+        button_cluster.addWidget(self.btn_fine_focus)
         button_cluster.addWidget(self.btn_snap)
         button_cluster.addWidget(self.btn_quit)
 
@@ -126,12 +130,14 @@ class MainWindow(QMainWindow):
         self.preview_cbox.setChecked(True)
         self.normalize_cbox = QCheckBox()
         self.normalize_cbox.setChecked(False)
+        self.focus_variance = QLabel("0.0")
         adjustment_fields_layout = QFormLayout()
         adjustment_fields_layout.addRow("Laplacian", self.laplacian_spin)
         adjustment_fields_layout.addRow("Filter", self.filter_spin)
         adjustment_fields_layout.addRow("Filter Enable", self.filter_cbox)
         adjustment_fields_layout.addRow("Normalize Enable", self.normalize_cbox)
         adjustment_fields_layout.addRow("Raw Preview", self.preview_cbox)
+        adjustment_fields_layout.addRow("Focus Variance", self.focus_variance)
         self.laplacian = DEFAULT_LAPLACIAN
         self.laplacian_spin.valueChanged.connect(self.onLaplacian)
         self.filter_value = DEFAULT_FILTER
@@ -210,6 +216,8 @@ class MainWindow(QMainWindow):
         self.raw_preview_enable = state
     def onNormalizeState(self, state):
         self.normalize_enable = state
+    def onFineFocus(self):
+        self.fine_focus_event.set()
     
     def draw_graph(self, data, w=500, h=500):
         MARGIN = 0.1
@@ -489,7 +497,10 @@ class MainWindow(QMainWindow):
             laplacian = cv2.Laplacian(cv2_image, -1, ksize=self.get_laplacian())
             self.focus_scores.popleft()
             try:
-                self.focus_scores.append(abs(laplacian.var()))
+                score = abs(laplacian.var())
+                self.focus_scores.append(score)
+                self.focus_queue.put((datetime.now(), score), block=False)
+                self.focus_variance.setText(f"{statistics.stdev(list(self.focus_scores)):0.2f}")
             except ValueError:
                 logging.debug("Laplacian had 0 variance, inserting bogus value for focus")
                 self.focus_scores.append(0)
@@ -521,17 +532,20 @@ class MainWindow(QMainWindow):
                     #lap_u8 = cv2.normalize(laplacian, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                     self.lbl_fullres.setPixmap(QPixmap.fromImage(qimage2ndarray.array2qimage(laplacian, normalize=True)))
 
-            # update machine state, if any available
+            # update machine state UI
             try:
-                poi = self.jubilee_state.get(block = False)
-                if poi.piezo:
-                    self.label_piezo_offset.setText(f"{poi.piezo}({(poi.piezo * PIEZO_UM_PER_LSB):0.2f}um)")
-                if poi.z:
-                    self.label_z_offset.setText(f"{poi.z:0.2f}mm")
-                if poi.x:
-                    self.label_x.setText(f"{poi.x:0.2f}mm")
-                if poi.y:
-                    self.label_y.setText(f"{poi.y:0.2f}mm")
+                poi = None
+                while not self.jubilee_state.empty(): # drain the POI queue entirely, keeping only the latest value
+                    poi = self.jubilee_state.get(block = False)
+                if poi is not None:
+                    if poi.piezo:
+                        self.label_piezo_offset.setText(f"{poi.piezo}({(poi.piezo * PIEZO_UM_PER_LSB):0.2f}um)")
+                    if poi.z:
+                        self.label_z_offset.setText(f"{poi.z:0.2f}mm")
+                    if poi.x:
+                        self.label_x.setText(f"{poi.x:0.2f}mm")
+                    if poi.y:
+                        self.label_y.setText(f"{poi.y:0.2f}mm")
             except queue.Empty:
                 pass
 
@@ -633,7 +647,9 @@ def snapper(w, image_name, auto_snap_event, auto_snap_done):
         auto_snap_done.set()
 
 
-def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queue, mag, jubilee_state):
+def cam(cam_quit, gamma, image_name,
+        auto_snap_event, auto_snap_done,
+        focus_queue, mag, jubilee_state, fine_focus_event):
     app = QApplication(sys.argv)
     w = MainWindow(mag)
     w.setGeometry(50, 500, 2200, 3000)
@@ -644,6 +660,7 @@ def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queu
     w.single_snap_done = Event()
     w.focus_queue = focus_queue
     w.jubilee_state = jubilee_state
+    w.fine_focus_event = fine_focus_event
 
     # Run a thread to forward/manage snapshotting events
     b = Thread(target=snapper, args=[w, image_name, auto_snap_event, auto_snap_done])

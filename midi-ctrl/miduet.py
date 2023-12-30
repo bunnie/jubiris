@@ -38,6 +38,7 @@ from threading import Thread, Event
 import queue
 import numpy as np
 import math
+import pandas as pd
 
 from datetime import datetime
 
@@ -54,6 +55,8 @@ SERIAL_NO_MOT1  = 'FTD3MLD8'
 SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 3
 MAX_GAMMA = 2.0
+
+FOCUS_MAX_HISTORY = 2000
 
 cam_quit = Event()
 
@@ -109,7 +112,8 @@ def all_leds_off(schema, midi):
                 midi.set_led_state(note_id, False)
 
 def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
-         auto_snap_done, auto_snap_event, schema, focus_queue, jubilee_state):
+         auto_snap_done, auto_snap_event, schema,
+         focus_queue, jubilee_state, fine_focus_event):
     # clear any stray events in the queue
     midi.clear_events()
     if jubilee.motors_off():
@@ -149,6 +153,18 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
     last_piezo_value = 0.0
     new_piezo_value = 0.0
 
+    focus_df = pd.DataFrame({
+        "time" : [],
+        "focus" : [],
+        "state" : [],
+        "piezo" : [],
+        "z" : [],
+    })
+    focus_state = "IDLE"
+    focus_start = datetime.now()
+    FOCUS_SAMPLE_DURATION_S = 2.0
+    FOCUS_SAMPLE_DURATION_SAMPLES = 5
+
     profiling = False
     while True:
         if profiling:
@@ -156,6 +172,32 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
         if cam_quit.is_set():
             all_leds_off(schema, midi)
             return
+        
+        # Drain the focus queue
+        # Note to self: variance of a static image is <5. Table vibration > 300 deviation. Focus changes ~100 deviation.
+        while not focus_queue.empty():
+            (t, f) = focus_queue.get()
+            focus_df.loc[len(focus_df)] = [t, f, focus_state, piezo.code, jubilee.z]
+            if len(focus_df) > FOCUS_MAX_HISTORY:
+                focus_df.drop(index=0, inplace=True)
+        
+        if fine_focus_event.is_set():
+            # do the fine focus algorithm
+            if focus_state == "IDLE":
+                logging.info("Got fine focus request")
+                focus_state = "START"
+                focus_start = datetime.now()
+            elif focus_state == "START":
+                if (datetime.now() - focus_start).seconds > FOCUS_SAMPLE_DURATION_S:
+                    focus_state = "EXIT"
+            elif focus_state == "EXIT":
+                # Call this when we're done with fine focus algo...
+                fine_focus_event.clear()
+                focus_state = "IDLE"
+                initial_data = focus_df[focus_df['time'] >= focus_start]
+                logging.info(f"Standard deviation: {initial_data['focus'].std()}, mean: {initial_data['focus'].mean()}, len: {len(initial_data['focus'])}")
+            else:
+                logging.warning("Unrecognized focus state: f{focus_state}")
 
         # Hardware control loop
         msg = midi.midi.poll()
@@ -183,9 +225,8 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
                     nudge = float(new_piezo_value) * (MAX_PIEZO / 127.0)
                     piezo.set_code(int(nudge))
                     piezo_changed = False
-                    if not jubilee_state.full(): # pass the updated value onto the UI thread
-                        poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
-                        jubilee_state.put(poi, block=False)
+                    poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
+                    jubilee_state.put(poi, block=False)
                 last_piezo_value = new_piezo_value
 
             if profiling:
@@ -292,15 +333,12 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
                             maybe_poi = re.findall(r'^recall POI (\d)', name)
                             if len(maybe_poi) == 1:
                                 poi_index = int(maybe_poi[0])
-                                maybe_poi = jubilee.recall_poi(poi_index)
-                                if maybe_poi is not None:
-                                    l_p = maybe_poi
-                                    if l_p is not None:
-                                        piezo.set_code(l_p)
+                                piezo_residual = jubilee.recall_poi(poi_index)
+                                if piezo_residual is not None:
+                                    piezo.set_code(piezo_residual)
                                     logging.info(f"Recall POI {poi_index}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}")
-                                    if not jubilee_state.full(): # pass the updated value onto the UI thread
-                                        poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
-                                        jubilee_state.put(poi, block=False)
+                                    poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
+                                    jubilee_state.put(poi, block=False)
 
                         elif name == 'quit button':
                             jubilee.motors_off()
@@ -525,10 +563,9 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
                     if jubilee.step_axis(name, step):
                         logging.warning("Motor command timeout!")
                         midi.clear_events()
-            # try to update our state to the UI/camera thread, but don't try too hard
-            if not jubilee_state.full():
-                poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
-                jubilee_state.put(poi, block=False)
+            # update the UI thread
+            poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
+            jubilee_state.put(poi, block=False)
 
 def set_controls(midi_in):
     # Control schema layout
@@ -658,10 +695,14 @@ def main():
     image_name.rep = args.reps
     auto_snap_event = Event()
     auto_snap_done = Event()
-    focus_score = queue.Queue(maxsize=1) # don't buffer too many frames
-    jubilee_state = queue.Queue(maxsize=1)
+    fine_focus_event = Event()
+    focus_score = queue.Queue()
+    jubilee_state = queue.Queue()
     if not args.no_cam:
-        c = Thread(target=cam, args=[cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_score, args.mag, jubilee_state])
+        c = Thread(target=cam, args=[
+            cam_quit, gamma, image_name,
+            auto_snap_event, auto_snap_done,
+            focus_score, args.mag, jubilee_state, fine_focus_event])
         c.start()
 
     numeric_level = getattr(logging, args.loglevel.upper(), None)
@@ -754,7 +795,9 @@ def main():
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
                     q.start()
                     l = Thread(target=loop, args=[
-                        args, stepsize, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_score, jubilee_state
+                        args, stepsize, j, m, l, p, gamma, image_name,
+                        auto_snap_done, auto_snap_event, schema,
+                        focus_score, jubilee_state, fine_focus_event
                     ])
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion
