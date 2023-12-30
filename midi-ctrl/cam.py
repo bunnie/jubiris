@@ -36,6 +36,11 @@ FOCUS_AREA_PX = 1536
 GRAPH_WINDOW = 50
 USE_GAMMA = False
 
+INIT_EXPO_TIME=120_000
+INIT_EXPO_GAIN=100
+INIT_TEMP=6325
+INIT_TINT=1907
+
 def adjust_gamma(image, gamma=1.0):
 	# build a lookup table mapping the pixel values [0, 255] to
 	# their adjusted gamma values
@@ -400,21 +405,11 @@ class MainWindow(QMainWindow):
             self.res = self.hcam.get_eSize()
             self.imgWidth = self.cur.model.res[self.res].width
             self.imgHeight = self.cur.model.res[self.res].height
-            # with QSignalBlocker(self.cmb_res):
-            #     self.cmb_res.clear()
-            #     for i in range(0, self.cur.model.preview):
-            #         self.cmb_res.addItem("{}*{}".format(self.cur.model.res[i].width, self.cur.model.res[i].height))
-            #     self.cmb_res.setCurrentIndex(self.res)
-            #     self.cmb_res.setEnabled(True)
             self.hcam.put_Option(toupcam.TOUPCAM_OPTION_BYTEORDER, 0) #Qimage use RGB byte order
             self.hcam.put_AutoExpoEnable(0)
             self.startCamera()
 
             # set some defaults
-            INIT_EXPO_TIME=160_000
-            INIT_EXPO_GAIN=100
-            INIT_TEMP=6325
-            INIT_TINT=1907
             self.slider_temp.setValue(INIT_TEMP)
             self.slider_tint.setValue(INIT_TINT)
             self.slider_expoGain.setValue(INIT_EXPO_GAIN)
@@ -446,19 +441,6 @@ class MainWindow(QMainWindow):
 
     def onBtnSnap(self):
         if self.hcam:
-            # if 0 == self.cur.model.still:    # not support still image capture
-            #     if self.pData is not None:
-            #         image = QImage(self.pData, self.imgWidth, self.imgHeight, QImage.Format_RGB888)
-            #         self.count += 1
-            #         image.save("pyqt{}.jpg".format(self.count))
-            # else:
-                # menu = QMenu()
-                # for i in range(0, self.cur.model.still):
-                #     action = QAction("{}*{}".format(self.cur.model.res[i].width, self.cur.model.res[i].height), self)
-                #     action.setData(i)
-                #     menu.addAction(action)
-                # action = menu.exec(self.mapToGlobal(self.btn_snap.pos()))
-
             self.hcam.Snap(0) # argument is the resolution of the snap
 
     @staticmethod
