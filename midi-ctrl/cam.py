@@ -25,10 +25,10 @@ from datetime import datetime
 
 DEFAULT_LAPLACIAN_5X = 3 # this gets multiplied by 2 and 1 added to ensure the result is odd
 DEFAULT_FILTER_5X = 5
-DEFAULT_LAPLACIAN_10X = 5
-DEFAULT_FILTER_10X = 5 # I think the filter distance is about the same because we're looking to cancel out pixel noise, not feature noise
+DEFAULT_LAPLACIAN_10X = 4
+DEFAULT_FILTER_10X = 8
 DEFAULT_LAPLACIAN_20X = 7
-DEFAULT_FILTER_20X = 5
+DEFAULT_FILTER_20X = 10
 DEFAULT_LAPLACIAN = None
 DEFAULT_FILTER = None
 
@@ -239,7 +239,7 @@ class MainWindow(QMainWindow):
     
     def draw_graph(self, data, w=500, h=500):
         MARGIN = 0.1
-        MIN_Y_RANGE = 0.035
+        MIN_Y_RANGE = 400
         canvas = np.full((h, w, 3), 255, dtype=np.uint8)
         min_y = min(data)
         self.min_y_window.popleft()
@@ -553,7 +553,7 @@ class MainWindow(QMainWindow):
             laplacian = cv2.Laplacian(cv2_image, -1, ksize=self.get_laplacian())
             self.focus_scores.popleft()
             try:
-                self.focus_scores.append(log10(abs(laplacian.var())))
+                self.focus_scores.append(abs(laplacian.var()))
             except ValueError:
                 logging.debug("Laplacian had 0 variance, inserting bogus value for focus")
                 self.focus_scores.append(0)
