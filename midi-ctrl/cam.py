@@ -23,6 +23,8 @@ from collections import deque
 from math import log10
 from datetime import datetime
 
+from jubilee import Poi
+
 DEFAULT_LAPLACIAN_5X = 3 # this gets multiplied by 2 and 1 added to ensure the result is odd
 DEFAULT_FILTER_5X = 5
 DEFAULT_LAPLACIAN_10X = 4
@@ -54,6 +56,7 @@ class MainWindow(QMainWindow):
     evtCallback = pyqtSignal(int)
 
     def __init__(self, mag):
+        # defaults based on installed lens
         if mag == 5:
             DEFAULT_FILTER = DEFAULT_FILTER_5X
             DEFAULT_LAPLACIAN = DEFAULT_LAPLACIAN_5X
@@ -66,6 +69,7 @@ class MainWindow(QMainWindow):
             logging.warning("20x values are estimated and need tuning.")
 
         super().__init__()
+        # instance variables
         self.image_name = None
         self.hcam = None
         self.timer = QTimer(self)
@@ -77,12 +81,14 @@ class MainWindow(QMainWindow):
         self.tint = toupcam.TOUPCAM_TINT_DEF
         self.count = 0
         self.focus_queue = None # this must be initialized to a Queue for image queuing code to run
+        self.jubilee_state = None # This is a Queue that contains Poi records
         self.oneshot_expo_print = False
         self.focus_scores = deque([0] * GRAPH_WINDOW, maxlen=GRAPH_WINDOW)
         # track values a little beyond the graph window so we "average in" to new zoom scales
         self.min_y_window = deque([1e50] * int(GRAPH_WINDOW * 0.2), maxlen=int(GRAPH_WINDOW * 0.2))
         self.max_y_window = deque([0.0] * int(GRAPH_WINDOW * 0.2), maxlen=int(GRAPH_WINDOW * 0.2))
 
+        # exposure panel
         self.cbox_auto = QCheckBox()
         self.cbox_auto.setChecked(False)
         self.spinbox_expoTime = QSpinBox()
@@ -99,15 +105,17 @@ class MainWindow(QMainWindow):
         self.spinbox_expoTime.valueChanged.connect(self.onExpoTime)
         self.spinbox_expoGain.valueChanged.connect(self.onExpoGain)
 
+        # global state control buttons
         self.btn_quit = QPushButton("Quit")
         self.btn_quit.clicked.connect(self.onBtnQuit)
         self.btn_snap = QPushButton("Snap")
         self.btn_snap.setEnabled(False)
         self.btn_snap.clicked.connect(self.onBtnSnap)
         button_cluster = QVBoxLayout()
-        button_cluster.addWidget(self.btn_quit)
         button_cluster.addWidget(self.btn_snap)
+        button_cluster.addWidget(self.btn_quit)
 
+        # autofocus image processing
         self.laplacian_spin = QSpinBox()
         self.laplacian_spin.setValue(DEFAULT_LAPLACIAN)
         self.filter_spin = QSpinBox()
@@ -135,6 +143,14 @@ class MainWindow(QMainWindow):
         self.normalize_enable = False
         self.normalize_cbox.stateChanged.connect(self.onNormalizeState)
 
+        # autofocus control
+        self.label_z_offset = QLabel("0.0")
+        self.label_piezo_offset = QLabel("0")
+        autofocus_panel_layout = QFormLayout()
+        autofocus_panel_layout.addRow("Z-height", self.label_z_offset)
+        autofocus_panel_layout.addRow("Piezo", self.label_piezo_offset)
+
+        # fps rating
         self.lbl_frame = QLabel()
 
         # build a graph area
@@ -143,10 +159,12 @@ class MainWindow(QMainWindow):
         # assemble the control panel horizontally
         hlyt_ctrl = QHBoxLayout()
         hlyt_ctrl.addLayout(exposure_layout)
+        hlyt_ctrl.addStretch()
+        hlyt_ctrl.addLayout(autofocus_panel_layout)
         hlyt_ctrl.addLayout(adjustment_fields_layout)
-        hlyt_ctrl.addLayout(button_cluster)
         hlyt_ctrl.addWidget(self.graph)
         hlyt_ctrl.addStretch()
+        hlyt_ctrl.addLayout(button_cluster)
         wg_ctrl = QWidget()
         wg_ctrl.setLayout(hlyt_ctrl)
         wg_ctrl.setMinimumHeight(500)
@@ -499,6 +517,14 @@ class MainWindow(QMainWindow):
                     #lap_u8 = cv2.normalize(laplacian, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                     self.lbl_fullres.setPixmap(QPixmap.fromImage(qimage2ndarray.array2qimage(laplacian, normalize=True)))
 
+            # update machine state, if any available
+            try:
+                poi = self.jubilee_state.get(block = False)
+                self.label_piezo_offset.setText(f"{poi.piezo}")
+                self.label_z_offset.setText(f"{poi.z:0.3f}")
+            except queue.Empty:
+                pass
+
 
     def handleExpoEvent(self):
         time = self.hcam.get_ExpoTime()
@@ -597,7 +623,7 @@ def snapper(w, image_name, auto_snap_event, auto_snap_done):
         auto_snap_done.set()
 
 
-def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queue, mag):
+def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queue, mag, jubilee_state):
     app = QApplication(sys.argv)
     w = MainWindow(mag)
     w.setGeometry(50, 500, 2200, 3000)
@@ -607,6 +633,7 @@ def cam(cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_queu
     w.setupCamera()
     w.single_snap_done = Event()
     w.focus_queue = focus_queue
+    w.jubilee_state = jubilee_state
 
     # Run a thread to forward/manage snapshotting events
     b = Thread(target=snapper, args=[w, image_name, auto_snap_event, auto_snap_done])

@@ -108,7 +108,8 @@ def all_leds_off(schema, midi):
                 note_id = int(control_node.split('=')[1])
                 midi.set_led_state(note_id, False)
 
-def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_queue):
+def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
+         auto_snap_done, auto_snap_event, schema, focus_queue, jubilee_state):
     # clear any stray events in the queue
     midi.clear_events()
     if jubilee.motors_off():
@@ -182,6 +183,9 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name, auto_sn
                     nudge = float(new_piezo_value) * (MAX_PIEZO / 127.0)
                     piezo.set_code(int(nudge))
                     piezo_changed = False
+                    if not jubilee_state.full(): # pass the updated value onto the UI thread
+                        poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
+                        jubilee_state.put(poi, block=False)
                 last_piezo_value = new_piezo_value
 
             if profiling:
@@ -294,6 +298,9 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name, auto_sn
                                     if l_p is not None:
                                         piezo.set_code(l_p)
                                     logging.info(f"Recall POI {poi_index}. X: {jubilee.x:0.2f}, Y: {jubilee.y:0.2f}, Z: {jubilee.z:0.2f}, P: {piezo.code}, Z': {(jubilee.z - piezo.code * PIEZO_UM_PER_LSB / 1000):0.3f}")
+                                    if not jubilee_state.full(): # pass the updated value onto the UI thread
+                                        poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
+                                        jubilee_state.put(poi, block=False)
 
                         elif name == 'quit button':
                             jubilee.motors_off()
@@ -518,8 +525,10 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name, auto_sn
                     if jubilee.step_axis(name, step):
                         logging.warning("Motor command timeout!")
                         midi.clear_events()
-                    
-                    # TODO: add the rotation control here
+            # try to update our state to the UI/camera thread, but don't try too hard
+            if not jubilee_state.full():
+                poi = Poi(jubilee.x, jubilee.y, jubilee.z, piezo.code)
+                jubilee_state.put(poi, block=False)
 
 def set_controls(midi_in):
     # Control schema layout
@@ -650,8 +659,9 @@ def main():
     auto_snap_event = Event()
     auto_snap_done = Event()
     focus_score = queue.Queue(maxsize=1) # don't buffer too many frames
+    jubilee_state = queue.Queue(maxsize=1)
     if not args.no_cam:
-        c = Thread(target=cam, args=[cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_score, args.mag])
+        c = Thread(target=cam, args=[cam_quit, gamma, image_name, auto_snap_event, auto_snap_done, focus_score, args.mag, jubilee_state])
         c.start()
 
     numeric_level = getattr(logging, args.loglevel.upper(), None)
@@ -744,7 +754,7 @@ def main():
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
                     q.start()
                     l = Thread(target=loop, args=[
-                        args, stepsize, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_score
+                        args, stepsize, j, m, l, p, gamma, image_name, auto_snap_done, auto_snap_event, schema, focus_score, jubilee_state
                     ])
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion
