@@ -36,10 +36,10 @@ FOCUS_AREA_PX = 1536
 GRAPH_WINDOW = 50
 USE_GAMMA = False
 
-INIT_EXPO_TIME=120_000
+INIT_EXPO_TIME=160
 INIT_EXPO_GAIN=100
-INIT_TEMP=6325
-INIT_TINT=1907
+INIT_TEMP=6100
+INIT_TINT=1880
 
 def adjust_gamma(image, gamma=1.0):
 	# build a lookup table mapping the pixel values [0, 255] to
@@ -52,23 +52,6 @@ def adjust_gamma(image, gamma=1.0):
 
 class MainWindow(QMainWindow):
     evtCallback = pyqtSignal(int)
-
-    @staticmethod
-    def makeLayout(lbl_1, sli_1, val_1, lbl_2, sli_2, val_2):
-        hlyt_1 = QHBoxLayout()
-        hlyt_1.addWidget(lbl_1)
-        hlyt_1.addStretch()
-        hlyt_1.addWidget(val_1)
-        hlyt_2 = QHBoxLayout()
-        hlyt_2.addWidget(lbl_2)
-        hlyt_2.addStretch()
-        hlyt_2.addWidget(val_2)
-        vlyt = QVBoxLayout()
-        vlyt.addLayout(hlyt_1)
-        vlyt.addWidget(sli_1)
-        vlyt.addLayout(hlyt_2)
-        vlyt.addWidget(sli_2)
-        return vlyt
 
     def __init__(self, mag):
         if mag == 5:
@@ -100,52 +83,21 @@ class MainWindow(QMainWindow):
         self.min_y_window = deque([1e50] * int(GRAPH_WINDOW * 0.2), maxlen=int(GRAPH_WINDOW * 0.2))
         self.max_y_window = deque([0.0] * int(GRAPH_WINDOW * 0.2), maxlen=int(GRAPH_WINDOW * 0.2))
 
-        gbox_exp = QGroupBox("Exposure")
         self.cbox_auto = QCheckBox()
-        self.cbox_auto.setEnabled(False)
-        lbl_auto = QLabel("Auto exposure")
-        hlyt_auto = QHBoxLayout()
-        hlyt_auto.addWidget(self.cbox_auto)
-        hlyt_auto.addWidget(lbl_auto)
-        hlyt_auto.addStretch()
-        lbl_time = QLabel("Time(us):")
-        lbl_gain = QLabel("Gain(%):")
-        self.lbl_expoTime = QLabel("0")
-        self.lbl_expoGain = QLabel("0")
-        self.slider_expoTime = QSlider(Qt.Horizontal)
-        self.slider_expoGain = QSlider(Qt.Horizontal)
-        self.slider_expoTime.setEnabled(True)
-        self.slider_expoGain.setEnabled(True)
-        vlyt_exp = QVBoxLayout()
-        vlyt_exp.addLayout(hlyt_auto)
-        vlyt_exp.addLayout(self.makeLayout(lbl_time, self.slider_expoTime, self.lbl_expoTime, lbl_gain, self.slider_expoGain, self.lbl_expoGain))
-        gbox_exp.setLayout(vlyt_exp)
+        self.cbox_auto.setChecked(False)
+        self.spinbox_expoTime = QSpinBox()
+        self.spinbox_expoTime.setValue(INIT_EXPO_TIME)
+        self.spinbox_expoGain = QSpinBox()
+        self.spinbox_expoGain.setValue(INIT_EXPO_GAIN)
+        self.spinbox_expoTime.setEnabled(True)
+        self.spinbox_expoGain.setEnabled(True)
+        exposure_layout = QFormLayout()
+        exposure_layout.addRow("Auto Exposure", self.cbox_auto)
+        exposure_layout.addRow("Time(ms)", self.spinbox_expoTime)
+        exposure_layout.addRow("Gain(%):", self.spinbox_expoGain)
         self.cbox_auto.stateChanged.connect(self.onAutoExpo)
-        self.slider_expoTime.valueChanged.connect(self.onExpoTime)
-        self.slider_expoGain.valueChanged.connect(self.onExpoGain)
-
-        gbox_wb = QGroupBox("White balance")
-        self.btn_autoWB = QPushButton("White balance")
-        self.btn_autoWB.setEnabled(False)
-        self.btn_autoWB.clicked.connect(self.onAutoWB)
-        lbl_temp = QLabel("Temperature:")
-        lbl_tint = QLabel("Tint:")
-        self.lbl_temp = QLabel(str(toupcam.TOUPCAM_TEMP_DEF))
-        self.lbl_tint = QLabel(str(toupcam.TOUPCAM_TINT_DEF))
-        self.slider_temp = QSlider(Qt.Horizontal)
-        self.slider_tint = QSlider(Qt.Horizontal)
-        self.slider_temp.setRange(toupcam.TOUPCAM_TEMP_MIN, toupcam.TOUPCAM_TEMP_MAX)
-        self.slider_temp.setValue(toupcam.TOUPCAM_TEMP_DEF)
-        self.slider_tint.setRange(toupcam.TOUPCAM_TINT_MIN, toupcam.TOUPCAM_TINT_MAX)
-        self.slider_tint.setValue(toupcam.TOUPCAM_TINT_DEF)
-        self.slider_temp.setEnabled(False)
-        self.slider_tint.setEnabled(False)
-        vlyt_wb = QVBoxLayout()
-        vlyt_wb.addLayout(self.makeLayout(lbl_temp, self.slider_temp, self.lbl_temp, lbl_tint, self.slider_tint, self.lbl_tint))
-        vlyt_wb.addWidget(self.btn_autoWB)
-        gbox_wb.setLayout(vlyt_wb)
-        self.slider_temp.valueChanged.connect(self.onWBTemp)
-        self.slider_tint.valueChanged.connect(self.onWBTint)
+        self.spinbox_expoTime.valueChanged.connect(self.onExpoTime)
+        self.spinbox_expoGain.valueChanged.connect(self.onExpoGain)
 
         self.btn_quit = QPushButton("Quit")
         self.btn_quit.clicked.connect(self.onBtnQuit)
@@ -156,7 +108,6 @@ class MainWindow(QMainWindow):
         button_cluster.addWidget(self.btn_quit)
         button_cluster.addWidget(self.btn_snap)
 
-        adjustment_fields_layout = QFormLayout()
         self.laplacian_spin = QSpinBox()
         self.laplacian_spin.setValue(DEFAULT_LAPLACIAN)
         self.filter_spin = QSpinBox()
@@ -167,11 +118,12 @@ class MainWindow(QMainWindow):
         self.preview_cbox.setChecked(True)
         self.normalize_cbox = QCheckBox()
         self.normalize_cbox.setChecked(False)
-        adjustment_fields_layout.addRow("Laplacian: ", self.laplacian_spin)
-        adjustment_fields_layout.addRow("Filter: ", self.filter_spin)
-        adjustment_fields_layout.addRow("Filter Enable: ", self.filter_cbox)
-        adjustment_fields_layout.addRow("Normalize Enable: ", self.normalize_cbox)
-        adjustment_fields_layout.addRow("Raw Preview: ", self.preview_cbox)
+        adjustment_fields_layout = QFormLayout()
+        adjustment_fields_layout.addRow("Laplacian", self.laplacian_spin)
+        adjustment_fields_layout.addRow("Filter", self.filter_spin)
+        adjustment_fields_layout.addRow("Filter Enable", self.filter_cbox)
+        adjustment_fields_layout.addRow("Normalize Enable", self.normalize_cbox)
+        adjustment_fields_layout.addRow("Raw Preview", self.preview_cbox)
         self.laplacian = DEFAULT_LAPLACIAN
         self.laplacian_spin.valueChanged.connect(self.onLaplacian)
         self.filter_value = DEFAULT_FILTER
@@ -190,9 +142,7 @@ class MainWindow(QMainWindow):
 
         # assemble the control panel horizontally
         hlyt_ctrl = QHBoxLayout()
-        #hlyt_ctrl.addWidget(gbox_res)
-        hlyt_ctrl.addWidget(gbox_exp)
-        hlyt_ctrl.addWidget(gbox_wb)
+        hlyt_ctrl.addLayout(exposure_layout)
         hlyt_ctrl.addLayout(adjustment_fields_layout)
         hlyt_ctrl.addLayout(button_cluster)
         hlyt_ctrl.addWidget(self.graph)
@@ -241,7 +191,7 @@ class MainWindow(QMainWindow):
     
     def draw_graph(self, data, w=500, h=500):
         MARGIN = 0.1
-        MIN_Y_RANGE = 400
+        MIN_Y_RANGE = 500
         canvas = np.full((h, w, 3), 255, dtype=np.uint8)
         min_y = min(data)
         self.min_y_window.popleft()
@@ -308,11 +258,8 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.lbl_frame.clear()
         self.cbox_auto.setEnabled(False)
-        self.slider_expoGain.setEnabled(False)
-        self.slider_expoTime.setEnabled(False)
-        self.btn_autoWB.setEnabled(False)
-        self.slider_temp.setEnabled(False)
-        self.slider_tint.setEnabled(False)
+        self.spinbox_expoGain.setEnabled(False)
+        self.spinbox_expoTime.setEnabled(False)
         self.btn_snap.setEnabled(False)
 
     def closeEvent(self, event):
@@ -333,66 +280,37 @@ class MainWindow(QMainWindow):
     def onAutoExpo(self, state):
         if self.hcam:
             self.hcam.put_AutoExpoEnable(1 if state else 0)
-            self.slider_expoTime.setEnabled(not state)
-            self.slider_expoGain.setEnabled(not state)
+            self.spinbox_expoTime.setEnabled(not state)
+            self.spinbox_expoGain.setEnabled(not state)
 
     def onExpoTime(self, value):
         if self.hcam:
-            self.lbl_expoTime.setText(str(value))
             if not self.cbox_auto.isChecked():
-                self.hcam.put_ExpoTime(value)
+                self.hcam.put_ExpoTime(value * 1000)
 
     def onExpoGain(self, value):
         if self.hcam:
-            self.lbl_expoGain.setText(str(value))
             if not self.cbox_auto.isChecked():
                 self.hcam.put_ExpoAGain(value)
-
-    def onAutoWB(self):
-        if self.hcam:
-            self.hcam.AwbOnce()
-
-    def wbCallback(nTemp, nTint, self):
-        self.slider_temp.setValue(nTemp)
-        self.slider_tint.setValue(nTint)
-
-    def onWBTemp(self, value):
-        if self.hcam:
-            self.temp = value
-            self.hcam.put_TempTint(self.temp, self.tint)
-            self.lbl_temp.setText(str(value))
-
-    def onWBTint(self, value):
-        if self.hcam:
-            self.tint = value
-            self.hcam.put_TempTint(self.temp, self.tint)
-            self.lbl_tint.setText(str(value))
 
     def startCamera(self):
         self.pData = bytes(toupcam.TDIBWIDTHBYTES(self.imgWidth * 32) * self.imgHeight)
         uimin, uimax, uidef = self.hcam.get_ExpTimeRange()
-        self.slider_expoTime.setRange(uimin, uimax)
-        #self.slider_expoTime.setValue(uidef)
+        self.spinbox_expoTime.setRange(uimin // 1000, uimax // 1000)
+        self.spinbox_expoTime.setValue(uidef // 1000)
         usmin, usmax, usdef = self.hcam.get_ExpoAGainRange()
-        self.slider_expoGain.setRange(usmin, usmax)
-        #self.slider_expoGain.setValue(usdef)
-        if self.cur.model.flag & toupcam.TOUPCAM_FLAG_MONO == 0:
-            self.handleTempTintEvent()
+        self.spinbox_expoGain.setRange(usmin, usmax)
+        self.spinbox_expoGain.setValue(usdef)
+
         try:
             self.hcam.StartPullModeWithCallback(self.eventCallBack, self)
         except toupcam.HRESULTException:
             self.closeCamera()
             QMessageBox.warning(self, "Warning", "Failed to start camera.")
         else:
-            #self.cmb_res.setEnabled(True)
             self.cbox_auto.setEnabled(True)
-            self.btn_autoWB.setEnabled(True)
-            self.slider_temp.setEnabled(True)
-            self.slider_tint.setEnabled(True)
-
             self.btn_snap.setEnabled(True)
             self.cbox_auto.setChecked(False)
-            self.btn_autoWB.setChecked(False)
             self.handleExpoEvent()
 
             self.timer.start(1000)
@@ -408,12 +326,11 @@ class MainWindow(QMainWindow):
             self.startCamera()
 
             # set some defaults
-            self.slider_temp.setValue(INIT_TEMP)
-            self.slider_tint.setValue(INIT_TINT)
-            self.slider_expoGain.setValue(INIT_EXPO_GAIN)
-            self.slider_expoTime.setValue(INIT_EXPO_TIME)
+            self.spinbox_expoGain.setValue(INIT_EXPO_GAIN)
+            self.spinbox_expoTime.setValue(INIT_EXPO_TIME)
             self.handleExpoEvent()
-            self.handleTempTintEvent()
+            # peg the tint at a sane default and leave it there.
+            self.hcam.put_TempTint(INIT_TEMP, INIT_TINT)
 
     def onBtnQuit(self):
         if self.hcam:
@@ -456,8 +373,6 @@ class MainWindow(QMainWindow):
                 self.handleExpoEvent()
                 # manual exposure only
                 pass
-            elif toupcam.TOUPCAM_EVENT_TEMPTINT == nEvent:
-                self.handleTempTintEvent()
             elif toupcam.TOUPCAM_EVENT_STILLIMAGE == nEvent:
                 self.handleStillImageEvent()
             elif toupcam.TOUPCAM_EVENT_ERROR == nEvent:
@@ -586,27 +501,15 @@ class MainWindow(QMainWindow):
 
 
     def handleExpoEvent(self):
-        return
         time = self.hcam.get_ExpoTime()
         gain = self.hcam.get_ExpoAGain()
-        with QSignalBlocker(self.slider_expoTime):
-            self.slider_expoTime.setValue(time)
-        with QSignalBlocker(self.slider_expoGain):
-            self.slider_expoGain.setValue(gain)
-        self.lbl_expoTime.setText(str(time))
-        self.lbl_expoGain.setText(str(gain))
-
-    def handleTempTintEvent(self):
-        nTemp, nTint = self.hcam.get_TempTint()
-        with QSignalBlocker(self.slider_temp):
-            self.slider_temp.setValue(nTemp)
-        with QSignalBlocker(self.slider_tint):
-            self.slider_tint.setValue(nTint)
-        self.lbl_temp.setText(str(nTemp))
-        self.lbl_tint.setText(str(nTint))
+        with QSignalBlocker(self.spinbox_expoTime):
+            self.spinbox_expoTime.setValue(time // 1000)
+        with QSignalBlocker(self.spinbox_expoGain):
+            self.spinbox_expoGain.setValue(gain)
 
     def handleStillImageEvent(self):
-        curtime = self.hcam.get_ExpoTime()
+        curtime = self.hcam.get_ExpoTime() * 1000
         curgain = self.hcam.get_ExpoAGain()
         # Set gain to 100 for minumum noise
         new_gain = 100
