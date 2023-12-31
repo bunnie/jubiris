@@ -126,8 +126,8 @@ class Light:
             self.get_limit_switches()
         
         # search down
-        while not self.upper_limit[which] and not self.lower_limit[which] and \
-            not self.upper_limit[self.other_motor(which)] and not self.lower_limit[self.other_motor(which)]:
+        while not self.lower_limit[which] and \
+            not self.lower_limit[self.other_motor(which)]:
             self.nudge_angle(which, -INCREMENT)
             self.get_limit_switches()
         assert self.lower_limit[which], "wrong limit switch hit!"
@@ -140,8 +140,8 @@ class Light:
         self.get_limit_switches()
 
         # search up
-        while not self.upper_limit[which] and not self.lower_limit[which] and \
-            not self.upper_limit[self.other_motor(which)] and not self.lower_limit[self.other_motor(which)]:
+        while not self.upper_limit[which] and \
+            not self.upper_limit[self.other_motor(which)]:
             self.nudge_angle(which, INCREMENT)
             self.get_limit_switches()
         assert self.upper_limit[which], "wrong limit switch hit!"
@@ -271,7 +271,7 @@ class Light:
             self.send_cmd("R 0")
             self.intensity_remote = 0
             # park the emitters near the bottom
-            self.set_angle('local', self.lower_angle_limit['local'] + 3 * math.pi, movement_time=1.5)
-            self.set_angle('remote', self.lower_angle_limit['remote'] + 3 * math.pi, movement_time=1.5)
+            self.set_angle('local', self.lower_angle_limit['local'] + 3 * math.pi, movement_time=2.0)
+            self.set_angle('remote', self.lower_angle_limit['remote'] + 3 * math.pi, movement_time=2.0)
             self.ser.close()
             logging.debug("Serial port closed")
