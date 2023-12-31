@@ -56,6 +56,13 @@ class Piezo:
         logging.debug(line)
         return timeout
     
+    def is_code_valid(self, a):
+        if a < 0:
+            return False
+        if a > PIEZO_MAX_CODE:
+            return False
+        return True
+    
     def set_code(self, a):
         a = int(a)
         if not self.enabled:
