@@ -7,6 +7,7 @@ MIN_ROTATION_ANGLE = -100.0
 MAX_ROTATION_ANGLE = 100.0
 CONTROL_MIN_ROTATION_ANGLE = -80.0 # somewhat not exactly degrees somehow...
 CONTROL_MAX_ROTATION_ANGLE = 80.0
+MIN_JUBILEE_STEP_MM = 0.01
 
 class Poi:
     def __init__(self, x, y, z, piezo):
@@ -75,6 +76,40 @@ class Jubilee:
         else:
             print('axis not yet implemented')
         return self.sync_to_mach()
+    
+    # sets one axis to a value. Only has an effect if the value changes
+    # the machine state versus the current recorded state. This is because
+    # re-writing the same value to the machine can still cause the microstepping
+    # to fluctuate and affect focus/vibrations.
+    def set_axis(self, axis, value):
+        updated = False
+        if not self.is_on():
+            return False # don't return an error, just silently fail
+        if (axis == 'x' or axis == 'y') and abs(value) > 30.0: # outside a reasonable request
+            return False
+        if axis == 'z' and (value < 8.0 or value > 15.0): # bind this tightly to a zone around 10.0, which is the default starting value
+            logging.warning("Requested Z on set_axis() is outside of a conservatively bound range.\nIf the machine is definitely safe, re-zero the motors and try again.")
+            return False
+
+        if 'x' in axis:
+            if value != self.x:
+                self.x = value
+                updated = True
+        elif 'y' in axis:
+            if value != self.y:
+                self.y = value
+                updated = True
+        elif 'z' in axis:
+            if value != self.z:
+                self.z = value
+                updated = True
+        else:
+            print('axis not yet implemented')
+        
+        if updated:
+            return self.sync_to_mach()
+        else: # if the value is a no-op, don't send the command.
+            return True
     
     def get_rotation(self):
         return self.r
