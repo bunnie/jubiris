@@ -78,7 +78,7 @@ class Light:
             logging.error(f"Requested angle {angle} is out of bounds, doing nothing!")
             self.cur_angle[which] = self.read_angle(which)
             return
-        
+
         # limit the slew rate of the motor
         slew = abs(self.cur_angle[which] - angle) / movement_time # rads/s
         if slew > MAX_SLEW:
@@ -106,7 +106,7 @@ class Light:
             self.lower_limit[self.other_motor(which)] and self.upper_limit[self.other_motor(which)]:
             logging.error("Both upper and lower limit switches are set, aborting homing!")
             return
-        
+
         # if a limit switch is currently hit, back us off
         adjusted = False
         if self.lower_limit[which]:
@@ -124,11 +124,11 @@ class Light:
         if adjusted:
             time.sleep(0.5)
             self.get_limit_switches()
-        
+
         # search down
         while not self.lower_limit[which] and \
             not self.lower_limit[self.other_motor(which)]:
-            self.nudge_angle(which, -INCREMENT)
+            self.nudge_angle(which, -INCREMENT, movement_time=0.05)
             self.get_limit_switches()
         assert self.lower_limit[which], "wrong limit switch hit!"
         self.lower_angle_limit[which] = self.read_angle(which)
@@ -142,7 +142,7 @@ class Light:
         # search up
         while not self.upper_limit[which] and \
             not self.upper_limit[self.other_motor(which)]:
-            self.nudge_angle(which, INCREMENT)
+            self.nudge_angle(which, INCREMENT, movement_time=0.05)
             self.get_limit_switches()
         assert self.upper_limit[which], "wrong limit switch hit!"
         self.upper_angle_limit[which] = self.read_angle(which)
@@ -150,7 +150,7 @@ class Light:
         # center it
         center_angle = (self.upper_angle_limit[which] + self.lower_angle_limit[which]) / 2
         self.set_angle(which, center_angle, movement_time=1.0)
-    
+
     # syncs the local wavelength setting to the controller
     def commit_wavelength(self):
         arg = 0
@@ -187,7 +187,7 @@ class Light:
 
         logging.debug(line)
         return timeout
-    
+
     def set_angle_from_control(self, a, which):
         angle = (a / 127.0) * (self.upper_angle_limit[which] - self.lower_angle_limit[which]) + self.lower_angle_limit[which]
         if which == 'local':
