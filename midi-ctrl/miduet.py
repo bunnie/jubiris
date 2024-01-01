@@ -404,7 +404,7 @@ class Iris():
             self.auto_snap_done.clear()
 
     # Runs a full focus sweep. Requires that the user makes some effort to bring the piece
-    # "somewhat" into focus.
+    # "somewhat" into focus so that there is a measurable gradient on the focus metric.
     def fine_focus(self):
         if not self.jubilee.is_on():
             logging.warning("Machine is not on, please turn on motors before attempting to focus!")
@@ -480,10 +480,10 @@ class Iris():
             sorted_curve = self.curve_df.sort_values(by="total_z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
             sorted_curve = sorted_curve.reset_index(drop=True)
             max_row = sorted_curve['focus_metric'].idxmax()
-            logging.info(f" --- max_row: {max_row}, data points: {len(self.curve_df)} ---")
-            logging.info(f"{sorted_curve}")
+            logging.debug(f" --- max_row: {max_row}, data points: {len(self.curve_df)} ---")
+            logging.debug(f"{sorted_curve}")
             if max_row >= len(self.curve_df) - FOCUS_STEPS_MARGIN:
-                logging.info("  -> increase Z")
+                logging.debug("  -> increase Z")
                 # best focus is toward highest total Z
                 if self.step_direction != 1:
                     self.step_direction = 1
@@ -494,7 +494,7 @@ class Iris():
                 self.step_start = datetime.datetime.now()
                 self.focus_state = "FIND_SLOPE"
             elif max_row < FOCUS_STEPS_MARGIN:
-                logging.info("  -> decrease Z")
+                logging.debug("  -> decrease Z")
                 # best focus is toward lowest total Z
                 if self.step_direction != -1:
                     self.step_direction = -1
@@ -513,7 +513,7 @@ class Iris():
                 )
                 logging.debug(self.curve_df['total_z'])
                 logging.debug(self.curve_df['focus_metric'])
-                logging.info(f"coefficients: {coefficients}")
+                logging.debug(f"coefficients: {coefficients}")
                 z_maxima = -coefficients[1] / (2 * coefficients[0])
                 plt.scatter(self.curve_df['total_z'], self.curve_df['focus_metric'])
                 xp = np.linspace(self.curve_df['total_z'].min() - 0.01, self.curve_df['total_z'].max() + 0.01, 100)
@@ -527,7 +527,7 @@ class Iris():
                     logging.error(f"Computed focus is bogus: {z_maxima:0.3f}, [{self.curve_df['total_z'].min():0.3f}, {self.curve_df['total_z'].max():0.3f}]")
                 else:
                     # servo machine to maxima
-                    logging.info(f"Focus point at {z_maxima:0.3f}mm")
+                    logging.debug(f"Focus point at {z_maxima:0.3f}mm")
                     self.smart_set_z_mm(z_maxima)
 
                 # check focus score
