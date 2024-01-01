@@ -62,7 +62,7 @@ SCHEMA_VERSION = 3
 MAX_GAMMA = 2.0
 
 FOCUS_MAX_HISTORY = 2000
-FOCUS_SLOPE_SEARCH_STEPS = 6
+FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
 FOCUS_SAMPLE_DURATION_S = 1.0
 FOCUS_MIN_SAMPLES = 5
@@ -135,21 +135,6 @@ def is_focus_good(step_data):
         good_data = step_data[step_data['quality'] == 'good']
         logging.debug(f"{good_data}")
         return True, good_data['focus'].max(), good_data['focus'].std()
-
-# Split a total Z value into a jubilee and piezo setting
-def partition_z(zp, cur_jubilee_z):
-    if cur_jubilee_z - zp > 0 and cur_jubilee_z - zp < (PIEZO_MAX_CODE * PIEZO_UM_PER_LSB / 1000):
-        # see if we can get to zp without adjusting z at all
-        z = cur_jubilee_z
-        p_lsb = ((z - zp) * 1000) / PIEZO_UM_PER_LSB
-        logging.info(f"p_lsb only: {z}, {p_lsb}")
-    else:
-        Z_INCREMENT = 1/0.02
-        z = math.ceil(zp * Z_INCREMENT) / Z_INCREMENT
-        # make up the rest with the piezo
-        p_lsb = ((z - zp) * 1000) / PIEZO_UM_PER_LSB
-        logging.info(f"z and p_lsb: {z}, {p_lsb}")
-    return (z, p_lsb)
 
 # target for a thread that just consumes the cam_quit event and processes the safe exit sequence
 def quitter(jubilee, light, piezo, cam_quit):
@@ -241,6 +226,51 @@ class Iris():
     def total_z_mm(self):
         return self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
 
+    # Split a total Z value into a jubilee and piezo setting
+    def partition_z_mm(self, z_proposed_mm):
+        if self.jubilee.z - z_proposed_mm > 0 and self.jubilee.z - z_proposed_mm < (PIEZO_MAX_CODE * PIEZO_UM_PER_LSB / 1000):
+            # see if we can get to zp without adjusting z at all
+            z = self.jubilee.z
+            p_lsb = ((z - z_proposed_mm) * 1000) / PIEZO_UM_PER_LSB
+            logging.info(f"p_lsb only: {z}, {p_lsb}")
+        else:
+            Z_INCREMENT = 1/0.02
+            z = math.ceil(z_proposed_mm * Z_INCREMENT) / Z_INCREMENT
+            # make up the rest with the piezo
+            p_lsb = ((z - z_proposed_mm) * 1000) / PIEZO_UM_PER_LSB
+            logging.info(f"z and p_lsb: {z}, {p_lsb}")
+        return (z, p_lsb)
+
+    # Nudges the z distance, preferring to move the piezo before invoking jubilee
+    # nudge is in units of microns
+    def smart_nudge_z_um(self, nudge_um):
+        next_code = int(-nudge_um / PIEZO_UM_PER_LSB + self.piezo.code)
+
+        # step if possible; if not adjust Z-axis. this might be dubious due to z-axis inaccuracy
+        # (may be better to just determine the overall range prior to focus sweep and try to center things up)
+        if self.piezo.is_code_valid(next_code):
+            self.piezo.set_code(next_code)
+        else:
+            logging.info(f"Adjusting machine z: {next_code} is out of range @ {self.jubilee.z}mm")
+            if next_code > PIEZO_MAX_CODE / 2: # going too high
+                # z-axis has mapping of lower values are closer to objective, so subtract a min step
+                self.jubilee.step_axis('z', -MIN_JUBILEE_STEP_MM)
+                # recalculate the next code
+                next_code = self.piezo.code - (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
+                self.piezo.set_code(next_code)
+                logging.info(f"Code is now {next_code} @ {self.jubilee.z}mm")
+            else: # going too low
+                self.jubilee.step_axis('z', MIN_JUBILEE_STEP_MM)
+                next_code = self.piezo.code + (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
+                self.piezo.set_code(next_code)
+                logging.info(f"Code is now {next_code} @ {self.jubilee.z}mm")
+
+    def smart_set_z_mm(self, total_z_mm):
+        (jubilee_z, piezo_code) = self.partition_z_mm(total_z_mm)
+        logging.info(f"smart_set_z: {total_z_mm} -> ({jubilee_z}:0.2f, {piezo_code})")
+        self.jubilee.set_axis('z', jubilee_z)
+        self.piezo.set_code(piezo_code)
+
     def set_image_name(self):
         self.image_name.x = self.jubilee.x
         self.image_name.y = self.jubilee.y
@@ -309,7 +339,7 @@ class Iris():
                 zp = -(a * x + b * y + d) / c
 
                 # Compute Z partition
-                (z, p_lsb) = partition_z(zp, self.jubilee.z)
+                (z, p_lsb) = self.partition_z_mm(zp)
 
                 # check values
                 if p_lsb > PIEZO_MAX_CODE:
@@ -398,11 +428,10 @@ class Iris():
             self.step_start = datetime.datetime.now()
             self.focus_steps = 0
             self.focus_retries = 0
-            self.step_direction = 1 # 1 or -1 for increase or decreasing piezo code value (note impact on z has opposite sign :-/)
+            self.step_direction = 1 # 1 or -1 for increase or decreasing z value; increased Z is farther from objective
 
-            self.focus_starting_z = self.jubilee.z
-            self.focus_starting_piezo = self.piezo.code
             self.absolute_starting_z_mm = self.total_z_mm()
+            self.focus_starting_z_mm = self.absolute_starting_z_mm
         elif self.focus_state == "FIND_SLOPE":
             # safety check
             if self.total_z_mm() > self.absolute_starting_z_mm + FOCUS_MAX_EXCURSION_MM or \
@@ -410,7 +439,7 @@ class Iris():
                 logging.error("Focus run aborted, Z-excursion limit reached!")
                 self.focus_state = "EXIT"
             if (datetime.datetime.now() - self.step_start).total_seconds() > FOCUS_SAMPLE_DURATION_S * (self.focus_retries + 1):
-                logging.info(f"focus step {self.focus_steps}")
+                logging.debug(f"focus step {self.focus_steps}")
 
                 step_data = self.focus_df[(self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S))) \
                                           & (self.focus_df['quality'] != 'bad')]
@@ -419,7 +448,7 @@ class Iris():
                     # store data
                     self.focus_retries = 0
                     # have to re-index to not be working on a copy of the data
-                    logging.info(f"Step {self.piezo.code} var: {var}, mean: {metric}, len: {len(step_data['focus'])}")
+                    logging.info(f"Piezo {self.piezo.code} @ z={self.total_z_mm():0.3f} | var: {var}, mean: {metric}")
                     self.curve_df.loc[len(self.curve_df)] = [
                         self.piezo.code,
                         self.jubilee.z,
@@ -427,29 +456,9 @@ class Iris():
                         var,
                         self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
                     ]
-                    # nudge by 5um
-                    last_code = self.piezo.code
-                    nudge = FOCUS_STEP_UM / PIEZO_UM_PER_LSB
-                    next_code = int(nudge * self.step_direction + last_code) # positive step direction => negative z-height
-
-                    # step if possible; if not adjust Z-axis. this might be dubious due to z-axis inaccuracy
-                    # (may be better to just determine the overall range prior to focus sweep and try to center things up)
-                    if self.piezo.is_code_valid(next_code):
-                        self.piezo.set_code(next_code)
-                    else:
-                        logging.info(f"Adjusting machine z: {next_code} is out of range @ {self.jubilee.z}mm")
-                        if next_code > PIEZO_MAX_CODE / 2: # going too high
-                            # z-axis has mapping of lower values are closer to objective, so subtract a min step
-                            self.jubilee.step_axis('z', -MIN_JUBILEE_STEP_MM)
-                            # recalculate the next code
-                            next_code = last_code - (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
-                            self.piezo.set_code(next_code)
-                            logging.info(f"Code is now {next_code} @ {self.jubilee.z}mm")
-                        else: # going too low
-                            self.jubilee.step_axis('z', MIN_JUBILEE_STEP_MM)
-                            next_code = last_code + (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
-                            self.piezo.set_code(next_code)
-                            logging.info(f"Code is now {next_code} @ {self.jubilee.z}mm")
+                    # nudge by a focus step (5um for 10x objective)
+                    # positive step direction => negative z-height
+                    self.smart_nudge_z_um(FOCUS_STEP_UM * self.step_direction)
 
                     # report to UI
                     poi = self.current_pos_as_poi()
@@ -457,7 +466,7 @@ class Iris():
                     # prep next step
                     self.step_start = datetime.datetime.now()
                     self.focus_steps += 1
-                    if self.focus_steps > FOCUS_SLOPE_SEARCH_STEPS:
+                    if self.focus_steps >= FOCUS_SLOPE_SEARCH_STEPS:
                         self.focus_state = "ANALYZE_SLOPE"
                 else:
                     # remove the out of range data from the source self.focus_df dataframe
@@ -470,29 +479,27 @@ class Iris():
         elif self.focus_state == "ANALYZE_SLOPE":
             sorted_curve = self.curve_df.sort_values(by="total_z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
             max_row = sorted_curve.reset_index(drop=True)['focus_metric'].idxmax()
+            logging.info(f" --- max_row: {max_row}, data points: {len(self.curve_df)} ---")
+            logging.info(f"{sorted_curve}")
             if max_row >= len(self.curve_df) - FOCUS_STEPS_MARGIN:
+                logging.info("  -> increase Z")
                 # best focus is toward highest total Z
-                #  -> lower the piezo code to increase total Z more
-                if self.step_direction != -1:
-                    self.piezo.set_code(self.focus_starting_piezo)
-                    self.jubilee.set_axis('z', self.focus_starting_z)
-                    self.step_direction = -1
-                else:
-                    self.focus_starting_piezo = self.piezo.code
-                    self.focus_starting_z = self.jubilee.z
+                if self.step_direction != 1:
+                    self.step_direction = 1
+                    self.smart_set_z_mm(sorted_curve['total_z'].max() + self.step_direction * FOCUS_STEP_UM / 1000.0)
+                # restart the focus run
+                self.focus_starting_z_mm = self.total_z_mm()
                 self.focus_steps = 0
                 self.step_start = datetime.datetime.now()
                 self.focus_state = "FIND_SLOPE"
             elif max_row < FOCUS_STEPS_MARGIN:
+                logging.info("  -> decrease Z")
                 # best focus is toward lowest total Z
-                #  -> raise the piezo code to reduce totalZ more
-                if self.step_direction != 1:
-                    self.piezo.set_code(self.focus_starting_piezo)
-                    self.jubilee.set_axis('z', self.focus_starting_z)
-                    self.step_direction = 1
-                else:
-                    self.focus_starting_piezo = self.piezo.code
-                    self.focus_starting_z = self.jubilee.z
+                if self.step_direction != -1:
+                    self.step_direction = -1
+                    self.smart_set_z_mm(sorted_curve['total_z'].min() + self.step_direction * FOCUS_STEP_UM / 1000.0)
+                # restart the focus run
+                self.focus_starting_z_mm = self.total_z_mm()
                 self.focus_steps = 0
                 self.step_start = datetime.datetime.now()
                 self.focus_state = "FIND_SLOPE"
@@ -508,6 +515,7 @@ class Iris():
                 yp = np.polyval(coefficients, xp)
                 plt.plot(xp, yp)
                 plt.savefig("focus_fit.png", dpi=300)
+                plt.cla()
 
                 if z_maxima < self.curve_df['total_z'].min() - AUTOFOCUS_SAFETY_MARGIN_MM \
                 or z_maxima > self.curve_df['total_z'].max() + AUTOFOCUS_SAFETY_MARGIN_MM:
@@ -515,9 +523,7 @@ class Iris():
                 else:
                     # servo machine to maxima
                     logging.info(f"Focus point at {z_maxima:0.3f}mm")
-                    (new_z, new_piezo) = partition_z(z_maxima, self.jubilee.z)
-                    self.jubilee.set_axis('z', new_z)
-                    self.piezo.set_code(new_piezo)
+                    self.smart_set_z_mm(z_maxima)
 
                 # check focus score
                 self.focus_state = "EXIT"
