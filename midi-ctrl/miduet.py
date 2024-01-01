@@ -64,7 +64,6 @@ MAX_GAMMA = 2.0
 FOCUS_MAX_HISTORY = 2000
 FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
-FOCUS_SAMPLE_DURATION_S = 1.0
 FOCUS_MIN_SAMPLES = 5
 FOCUS_PIEZO_SETTLING_S = 0.2 # empirically determined settling time
 FOCUS_VARIANCE_THRESH = 8.0 # 1-sigma acceptable deviation for focus data
@@ -72,6 +71,8 @@ FOCUS_MAX_RETRIES = 10
 FOCUS_MAX_EXCURSION_MM = 0.2
 FOCUS_STEPS_MARGIN = 2 # minimum number of steps required to define one side of the focus curve
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
+FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machine has settled
+FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
 
 cam_quit = Event()
 
@@ -111,7 +112,7 @@ class ImageNamer:
             r = '1'
         return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}'
 
-# evaluate if the collected focus data meets our quality requirements
+# evaluate if the collected focus data meets our quality requirements (is the machine settled)
 # returns True if the data is usable, as well as the statistics on the data
 # returns False if more data should be collected. Bad data is marked as such.
 #
@@ -119,22 +120,38 @@ class ImageNamer:
 # improbable that any noise or focus problem accidentally creates a positive noise spike
 # in the metric.
 def is_focus_good(step_data):
-    max = step_data['focus'].max()
+    use_max_metric = True
+    metric = step_data['focus'].max()
     logging.debug(f"{step_data[['focus', 'quality']]}")
-    logging.debug(f"max: {max}")
+    logging.debug(f"max: {metric}")
     step_data.loc[:, 'quality'] = 'good'
     out_of_range_indices = \
-            (step_data['focus'] < max - FOCUS_VARIANCE_THRESH * 5)
-    step_data.loc[out_of_range_indices, 'quality'] = 'bad'
+            (step_data['focus'] < metric - FOCUS_VARIANCE_THRESH * 5)
     num_bad = len(step_data[out_of_range_indices])
+
+    if num_bad / len(step_data) > 0.8 and len(step_data) > 10:
+        # heuristic: if we have a lot of "bad" samples but a lot of data that's pretty tightly grouped,
+        # suspect that the "max" is an outlier. Switch to a "mean" metric.
+        metric = step_data['focus'].mean()
+        out_of_range_indices = \
+                (step_data['focus'] < metric - FOCUS_VARIANCE_THRESH * 2) \
+                | (step_data['focus'] > metric + FOCUS_VARIANCE_THRESH * 2)
+        num_bad = len(step_data[out_of_range_indices])
+        use_max_metric = False
+
+    step_data.loc[out_of_range_indices, 'quality'] = 'bad'
     if len(step_data) - num_bad < FOCUS_MIN_SAMPLES:
-        logging.warning(f"Greater than 3-sigma variation detected on focus data: {num_bad} of {len(step_data)} are out of range")
+        logging.warning(f"High variance on focus data: {num_bad} of {len(step_data)} are out of range")
         logging.debug(f"{step_data[['focus', 'quality']]}")
         return False, None, None
     else:
         good_data = step_data[step_data['quality'] == 'good']
+        if use_max_metric:
+            metric = good_data['focus'].max()
+        else:
+            metric = good_data['focus'].mean()
         logging.debug(f"{good_data}")
-        return True, good_data['focus'].max(), good_data['focus'].std()
+        return True, metric, good_data['focus'].std()
 
 # target for a thread that just consumes the cam_quit event and processes the safe exit sequence
 def quitter(jubilee, light, piezo, cam_quit):
@@ -199,6 +216,7 @@ class Iris():
         self.focus_queue = focus_queue
         self.jubilee_state = jubilee_state
         self.fine_focus_event = fine_focus_event
+        self.focus_automation = False
 
         # only setup the focus_df as the shared value between the main loop and the focus routine
         # the rest of the focus variables should be setup in the focus "IDLE" state
@@ -209,6 +227,8 @@ class Iris():
             "piezo" : [], # raw piezo code
             "z" : [],     # z-motor height
             "quality" : [], # quality check metric: unchecked, good, bad
+            "expo_g" : [], # exposure gain
+            "expo_t" : [], # exposure time
         })
         self.focus_state = "IDLE"
 
@@ -232,13 +252,13 @@ class Iris():
             # see if we can get to zp without adjusting z at all
             z = self.jubilee.z
             p_lsb = ((z - z_proposed_mm) * 1000) / PIEZO_UM_PER_LSB
-            logging.info(f"p_lsb only: {z}, {p_lsb}")
+            logging.debug(f"p_lsb only: {z}, {p_lsb}")
         else:
             Z_INCREMENT = 1/0.02
             z = math.ceil(z_proposed_mm * Z_INCREMENT) / Z_INCREMENT
             # make up the rest with the piezo
             p_lsb = ((z - z_proposed_mm) * 1000) / PIEZO_UM_PER_LSB
-            logging.info(f"z and p_lsb: {z}, {p_lsb}")
+            logging.debug(f"z and p_lsb: {z}, {p_lsb}")
         return (z, p_lsb)
 
     # Nudges the z distance, preferring to move the piezo before invoking jubilee
@@ -267,9 +287,38 @@ class Iris():
 
     def smart_set_z_mm(self, total_z_mm):
         (jubilee_z, piezo_code) = self.partition_z_mm(total_z_mm)
-        logging.info(f"smart_set_z: {total_z_mm} -> ({jubilee_z}:0.2f, {piezo_code})")
+        logging.info(f"smart_set_z: {total_z_mm} -> ({jubilee_z:0.2f}, {piezo_code})")
         self.jubilee.set_axis('z', jubilee_z)
         self.piezo.set_code(piezo_code)
+
+    # Requires that self.settling_start has been set!
+    def is_settled(self):
+        settling_data = self.focus_df[(self.focus_df['time'] >= (self.settling_start))]
+        if len(settling_data) < FOCUS_SETTLING_MIN_SAMPLES:
+            return False
+        else:
+            var = settling_data['focus'].std()
+            logging.debug(f"Setting metric: {var} @ {len(settling_data)} samples")
+            return var < 2 * FOCUS_VARIANCE_THRESH
+
+    def wait_for_machine_settling(self):
+        # wait for the machine to settle
+        expo_time_s = self.focus_df.loc[self.focus_df['time'].idxmax()]['expo_t'] / 1000
+        # make sure the settling window is at least long enough to capture the minimum number of frames!
+        if expo_time_s * (FOCUS_SETTLING_MIN_SAMPLES + 1) > FOCUS_SETTLING_WINDOW_S:
+            settling_window = expo_time_s * (FOCUS_SETTLING_MIN_SAMPLES + 1)
+        else:
+            settling_window = FOCUS_SETTLING_WINDOW_S
+        self.settling_start = datetime.datetime.now()
+        while True:
+            time.sleep(expo_time_s)
+            self.fetch_focus_events()
+            if self.is_settled():
+                break
+            now = datetime.datetime.now()
+            if (now - self.settling_start).total_seconds() > settling_window:
+                # update so that we have a sliding window for settling
+                self.settling_start = now - datetime.timedelta(seconds=settling_window)
 
     def set_image_name(self):
         self.image_name.x = self.jubilee.x
@@ -335,32 +384,48 @@ class Iris():
 
         for x in x_path:
             for y in y_path:
-                # derive composite-z
-                zp = -(a * x + b * y + d) / c
+                if not self.args.dynamic_focus:
+                    # derive composite-z
+                    zp = -(a * x + b * y + d) / c
 
-                # Compute Z partition
-                (z, p_lsb) = self.partition_z_mm(zp)
+                    # Compute Z partition
+                    (z, p_lsb) = self.partition_z_mm(zp)
 
-                # check values
-                if p_lsb > PIEZO_MAX_CODE:
-                    logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
-                    continue
-                if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
-                    logging.warning(f"Z value seems hazardous, aborting step: {z}")
-                    continue
-                if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
-                    logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
-                    continue
+                    # check values
+                    if p_lsb > PIEZO_MAX_CODE:
+                        logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
+                        continue
+                    if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
+                        logging.warning(f"Z value seems hazardous, aborting step: {z}")
+                        continue
+                    if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
+                        logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
+                        continue
 
-                logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
-                self.jubilee.goto((x, y, z))
-                self.piezo.set_code(p_lsb)
+                    logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
+                    self.jubilee.goto((x, y, z))
+                    self.piezo.set_code(p_lsb)
+                else:
+                    logging.info(f"Step to {x:0.2f}, {y:0.2f}")
+                    self.jubilee.goto((x, y, self.jubilee.z))
+                    self.wait_for_machine_settling()
+
+                    # run focus
+                    self.focus_automation = True
+                    self.fine_focus_event.set()
+                    while self.fine_focus_event.is_set():
+                        self.fetch_focus_events()
+                        self.fine_focus()
+                    self.focus_automation = False
+
+                    self.wait_for_machine_settling()
 
                 # setup the image_name object
                 self.set_image_name()
-                # wait for system to settle
-                logging.info(f"settling for {self.args.settling}s")
-                time.sleep(self.args.settling)
+                if not self.args.dynamic_focus:
+                    # wait for system to settle
+                    logging.info(f"settling for {self.args.settling}s")
+                    time.sleep(self.args.settling)
                 # this should trigger the picture
                 logging.info(f"triggering photos")
                 self.auto_snap_event.set()
@@ -432,49 +497,60 @@ class Iris():
 
             self.absolute_starting_z_mm = self.total_z_mm()
             self.focus_starting_z_mm = self.absolute_starting_z_mm
+            expo_time_s = self.focus_df.loc[self.focus_df['time'].idxmax()]['expo_t'] / 1000
+            self.focus_sample_duration_s = FOCUS_PIEZO_SETTLING_S + FOCUS_MIN_SAMPLES * expo_time_s
         elif self.focus_state == "FIND_SLOPE":
             # safety check
             if self.total_z_mm() > self.absolute_starting_z_mm + FOCUS_MAX_EXCURSION_MM or \
             self.total_z_mm() < self.absolute_starting_z_mm - FOCUS_MAX_EXCURSION_MM:
                 logging.error("Focus run aborted, Z-excursion limit reached!")
+                self.smart_set_z_mm(self.absolute_starting_z_mm) # reset machine to original state
                 self.focus_state = "EXIT"
-            if (datetime.datetime.now() - self.step_start).total_seconds() > FOCUS_SAMPLE_DURATION_S * (self.focus_retries + 1):
+            if (datetime.datetime.now() - self.step_start).total_seconds() > self.focus_sample_duration_s * (self.focus_retries + 1):
                 logging.debug(f"focus step {self.focus_steps}")
 
                 step_data = self.focus_df[(self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S))) \
                                           & (self.focus_df['quality'] != 'bad')]
-                is_good, metric, var = is_focus_good(step_data)
-                if is_good:
-                    # store data
-                    self.focus_retries = 0
-                    # have to re-index to not be working on a copy of the data
-                    logging.info(f"Piezo {self.piezo.code} @ z={self.total_z_mm():0.3f} | var: {var}, mean: {metric}")
-                    self.curve_df.loc[len(self.curve_df)] = [
-                        self.piezo.code,
-                        self.jubilee.z,
-                        metric,
-                        var,
-                        self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
-                    ]
-                    # nudge by a focus step (5um for 10x objective)
-                    # positive step direction => negative z-height
-                    self.smart_nudge_z_um(FOCUS_STEP_UM * self.step_direction)
-
-                    # report to UI
-                    poi = self.current_pos_as_poi()
-                    self.jubilee_state.put(poi, block=False)
-                    # prep next step
-                    self.step_start = datetime.datetime.now()
-                    self.focus_steps += 1
-                    if self.focus_steps >= FOCUS_SLOPE_SEARCH_STEPS:
-                        self.focus_state = "ANALYZE_SLOPE"
+                if len(step_data) < FOCUS_MIN_SAMPLES:
+                    time.sleep(0.2) # just give the machine some time to do its thing, things might be lagging...
                 else:
-                    # remove the out of range data from the source self.focus_df dataframe
-                    self.focus_retries += 1
-                    if self.focus_retries > FOCUS_MAX_RETRIES:
-                        self.focus_df.loc[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'bad'
-                        logging.error("Data quality too low for autofocus. Aborting run. Check for excessive environment vibration or camera noise.")
-                        self.focus_state = "EXIT"
+                    is_good, metric, var = is_focus_good(step_data)
+                    if is_good:
+                        # store data
+                        self.focus_retries = 0
+                        # have to re-index to not be working on a copy of the data
+                        logging.info(f"Piezo {self.piezo.code} @ z={self.total_z_mm():0.3f} | var: {var}, mean: {metric}")
+                        self.curve_df.loc[len(self.curve_df)] = [
+                            self.piezo.code,
+                            self.jubilee.z,
+                            metric,
+                            var,
+                            self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
+                        ]
+                        # nudge by a focus step (5um for 10x objective)
+                        # positive step direction => negative z-height
+                        self.smart_nudge_z_um(FOCUS_STEP_UM * self.step_direction)
+
+                        # report to UI
+                        poi = self.current_pos_as_poi()
+                        self.jubilee_state.put(poi, block=False)
+                        # prep next step
+                        self.step_start = datetime.datetime.now()
+                        self.focus_steps += 1
+                        if self.focus_steps >= FOCUS_SLOPE_SEARCH_STEPS:
+                            self.focus_state = "ANALYZE_SLOPE"
+                    else:
+                        # remove the out of range data from the source self.focus_df dataframe
+                        self.focus_retries += 1
+                        if self.focus_retries > FOCUS_MAX_RETRIES and not self.focus_automation:
+                            self.focus_df.loc[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'bad'
+                            logging.error("Data quality too low for autofocus. Aborting run. Check for excessive environment vibration or camera noise.")
+                            self.focus_state = "EXIT"
+                        elif self.focus_retries > FOCUS_MAX_RETRIES and self.focus_automation:
+                            self.step_start = datetime.datetime.now()
+                            self.focus_retries = 0
+                            logging.warning("Data quality problem in automation, restarting focus stream")
+
 
         elif self.focus_state == "ANALYZE_SLOPE":
             sorted_curve = self.curve_df.sort_values(by="total_z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
@@ -519,15 +595,17 @@ class Iris():
                 xp = np.linspace(self.curve_df['total_z'].min() - 0.01, self.curve_df['total_z'].max() + 0.01, 100)
                 yp = np.polyval(coefficients, xp)
                 plt.plot(xp, yp)
+                # Emit debug info
                 plt.savefig("focus_fit.png", dpi=300)
                 plt.cla()
 
                 if z_maxima < self.curve_df['total_z'].min() - AUTOFOCUS_SAFETY_MARGIN_MM \
                 or z_maxima > self.curve_df['total_z'].max() + AUTOFOCUS_SAFETY_MARGIN_MM:
                     logging.error(f"Computed focus is bogus: {z_maxima:0.3f}, [{self.curve_df['total_z'].min():0.3f}, {self.curve_df['total_z'].max():0.3f}]")
+                    self.smart_set_z_mm(self.absolute_starting_z_mm) # reset machine to original state before focus search
                 else:
                     # servo machine to maxima
-                    logging.debug(f"Focus point at {z_maxima:0.3f}mm")
+                    logging.info(f"Focus point at z={z_maxima:0.3f}mm")
                     self.smart_set_z_mm(z_maxima)
 
                 # check focus score
@@ -537,6 +615,7 @@ class Iris():
             # Call this when we're done with fine focus algo...
             self.fine_focus_event.clear()
             self.focus_state = "IDLE"
+            # Emit debug info
             self.focus_df.to_csv("focus.csv")
             self.curve_df.to_csv("curve.csv")
         else:
@@ -555,6 +634,19 @@ class Iris():
         self.piezo.set_code(int(nudge))
         poi = self.current_pos_as_poi()
         self.jubilee_state.put(poi, block=False)
+
+    def fetch_focus_events(self):
+        while not self.focus_queue.empty():
+            (timestamp, focus_metric, expo_gain, expo_time) = self.focus_queue.get()
+            if self.jubilee.z == None:
+                z_checked = 10.0
+            else:
+                z_checked = self.jubilee.z
+            self.focus_df.loc["last"] = [timestamp, focus_metric, self.focus_state, self.piezo.code, z_checked, "unchecked", expo_gain, expo_time]
+            self.focus_df = self.focus_df.reset_index(drop=True)
+            if len(self.focus_df) > FOCUS_MAX_HISTORY:
+                # cull some history to prevent storage problems
+                self.focus_df = self.focus_df.tail(-FOCUS_MAX_HISTORY // 2)
 
     def loop(self):
         # clear any stray events in the queue
@@ -601,18 +693,9 @@ class Iris():
                 self.all_leds_off()
                 return
 
-            # Drain the focus queue
+            # Drain the focus queue, run focus if requested
             # Note to self: variance of a static image is <5. Table vibration > 300 deviation. Focus changes ~100 deviation.
-            while not self.focus_queue.empty():
-                (t, f) = self.focus_queue.get()
-                if self.jubilee.z == None:
-                    z_checked = 10.0
-                else:
-                    z_checked = self.jubilee.z
-                self.focus_df.loc[len(self.focus_df)] = [t, f, self.focus_state, self.piezo.code, z_checked, "unchecked"]
-                if len(self.focus_df) > FOCUS_MAX_HISTORY:
-                    self.focus_df.drop(index=0, inplace=True)
-
+            self.fetch_focus_events()
             if self.fine_focus_event.is_set():
                 self.fine_focus()
 
@@ -914,6 +997,9 @@ def main():
     parser.add_argument(
         "--settling", required=False, type=float, default=5.0, help="Settling time in seconds between steps"
     )
+    parser.add_argument(
+        "--dynamic-focus", required=False, action="store_true", help="When set, ignore settling time and compute focus/quality metric on every image"
+    )
     args = parser.parse_args()
 
     gamma = Gamma()
@@ -923,7 +1009,7 @@ def main():
     auto_snap_event = Event()
     auto_snap_done = Event()
     fine_focus_event = Event()
-    focus_score = queue.Queue()
+    focus_score = queue.Queue(maxsize=5)
     jubilee_state = queue.Queue()
     if not args.no_cam:
         c = Thread(target=cam, args=[
