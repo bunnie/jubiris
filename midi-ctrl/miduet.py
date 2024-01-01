@@ -112,16 +112,19 @@ class ImageNamer:
         return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}'
 
 # evaluate if the collected focus data meets our quality requirements
-# returns True if the data is usable
-# returns False if more data should be collected. Bad data is removed from the set.
+# returns True if the data is usable, as well as the statistics on the data
+# returns False if more data should be collected. Bad data is marked as such.
+#
+# focus data is max-weighted: focus problems only reduce the focus metric. It is highly
+# improbable that any noise or focus problem accidentally creates a positive noise spike
+# in the metric.
 def is_focus_good(step_data):
-    mean = step_data['focus'].mean()
+    max = step_data['focus'].max()
     logging.debug(f"{step_data[['focus', 'quality']]}")
-    logging.debug(f"mean: {mean}")
+    logging.debug(f"max: {max}")
     step_data.loc[:, 'quality'] = 'good'
     out_of_range_indices = \
-            (step_data['focus'] < mean - FOCUS_VARIANCE_THRESH * 3) \
-            | (step_data['focus'] > mean + FOCUS_VARIANCE_THRESH * 3)
+            (step_data['focus'] < max - FOCUS_VARIANCE_THRESH * 5)
     step_data.loc[out_of_range_indices, 'quality'] = 'bad'
     num_bad = len(step_data[out_of_range_indices])
     if len(step_data) - num_bad < FOCUS_MIN_SAMPLES:
@@ -130,8 +133,8 @@ def is_focus_good(step_data):
         return False, None, None
     else:
         good_data = step_data[step_data['quality'] == 'good']
-        logging.info(f"{good_data}")
-        return True, good_data['focus'].mean(), good_data['focus'].std()
+        logging.debug(f"{good_data}")
+        return True, good_data['focus'].max(), good_data['focus'].std()
 
 # Split a total Z value into a jubilee and piezo setting
 def partition_z(zp, cur_jubilee_z):
@@ -388,7 +391,7 @@ class Iris():
             self.curve_df = pd.DataFrame({
                 "piezo" : [],
                 "z" : [],
-                "focus_mean" : [],
+                "focus_metric" : [],
                 "focus_var" : [],
                 "total_z" : []
             })
@@ -411,16 +414,16 @@ class Iris():
 
                 step_data = self.focus_df[(self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S))) \
                                           & (self.focus_df['quality'] != 'bad')]
-                is_good, mean, var = is_focus_good(step_data)
+                is_good, metric, var = is_focus_good(step_data)
                 if is_good:
                     # store data
                     self.focus_retries = 0
                     # have to re-index to not be working on a copy of the data
-                    logging.info(f"Step {self.piezo.code} var: {var}, mean: {mean}, len: {len(step_data['focus'])}")
+                    logging.info(f"Step {self.piezo.code} var: {var}, mean: {metric}, len: {len(step_data['focus'])}")
                     self.curve_df.loc[len(self.curve_df)] = [
                         self.piezo.code,
                         self.jubilee.z,
-                        mean,
+                        metric,
                         var,
                         self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
                     ]
@@ -434,16 +437,19 @@ class Iris():
                     if self.piezo.is_code_valid(next_code):
                         self.piezo.set_code(next_code)
                     else:
+                        logging.info(f"Adjusting machine z: {next_code} is out of range @ {self.jubilee.z}mm")
                         if next_code > PIEZO_MAX_CODE / 2: # going too high
                             # z-axis has mapping of lower values are closer to objective, so subtract a min step
                             self.jubilee.step_axis('z', -MIN_JUBILEE_STEP_MM)
                             # recalculate the next code
                             next_code = last_code - (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
                             self.piezo.set_code(next_code)
+                            logging.info(f"Code is now {next_code} @ {self.jubilee.z}mm")
                         else: # going too low
                             self.jubilee.step_axis('z', MIN_JUBILEE_STEP_MM)
                             next_code = last_code + (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
                             self.piezo.set_code(next_code)
+                            logging.info(f"Code is now {next_code} @ {self.jubilee.z}mm")
 
                     # report to UI
                     poi = self.current_pos_as_poi()
@@ -463,7 +469,7 @@ class Iris():
 
         elif self.focus_state == "ANALYZE_SLOPE":
             sorted_curve = self.curve_df.sort_values(by="total_z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
-            max_row = sorted_curve.reset_index(drop=True)['focus_mean'].idxmax()
+            max_row = sorted_curve.reset_index(drop=True)['focus_metric'].idxmax()
             if max_row >= len(self.curve_df) - FOCUS_STEPS_MARGIN:
                 # best focus is toward highest total Z
                 #  -> lower the piezo code to increase total Z more
@@ -492,12 +498,12 @@ class Iris():
                 self.focus_state = "FIND_SLOPE"
             else:
                 # fit to 2nd order and find maxima
-                coefficients = np.polyfit(self.curve_df['total_z'], self.curve_df['focus_mean'], deg=2)
+                coefficients = np.polyfit(self.curve_df['total_z'], self.curve_df['focus_metric'], deg=2)
                 logging.debug(self.curve_df['total_z'])
-                logging.debug(self.curve_df['focus_mean'])
+                logging.debug(self.curve_df['focus_metric'])
                 logging.info(f"coefficients: {coefficients}")
                 z_maxima = -coefficients[1] / (2 * coefficients[0])
-                plt.scatter(self.curve_df['total_z'], self.curve_df['focus_mean'])
+                plt.scatter(self.curve_df['total_z'], self.curve_df['focus_metric'])
                 xp = np.linspace(self.curve_df['total_z'].min() - 0.01, self.curve_df['total_z'].max() + 0.01, 100)
                 yp = np.polyval(coefficients, xp)
                 plt.plot(xp, yp)
