@@ -3,9 +3,9 @@ import serial
 
 PIEZO_UM_PER_VOLT = 1.17 # estimated
 PIEZO_MAX_VOLT = 103.97
-PIEZO_MAX_CODE = 16383
+PIEZO_MAX_CODE = 16383 # max scale overall
 PIEZO_UM_PER_LSB = 0.007425
-MAX_PIEZO = 8192 #16383
+MAX_PIEZO = 8192 #16383 # max scale for slider
 
 class Piezo:
     def __init__(self, ports=[]):
@@ -55,14 +55,14 @@ class Piezo:
 
         logging.debug(line)
         return timeout
-    
+
     def is_code_valid(self, a):
         if a < 0:
             return False
         if a > PIEZO_MAX_CODE:
             return False
         return True
-    
+
     def set_code(self, a):
         a = int(a)
         if not self.enabled:
@@ -76,7 +76,7 @@ class Piezo:
             return
         self.send_cmd(f"A {a}")
         self.code = a
-    
+
     def __enter__(self):
         return self
 
