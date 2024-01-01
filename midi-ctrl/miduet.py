@@ -48,6 +48,8 @@ from jubilee import Jubilee, Poi, MAX_POI, MIN_ROTATION_ANGLE, MAX_ROTATION_ANGL
     CONTROL_MIN_ROTATION_ANGLE, CONTROL_MAX_ROTATION_ANGLE, MIN_JUBILEE_STEP_MM
 from midi import Midi
 
+import matplotlib.pyplot as plt
+
 # Device-specific mapping of serial numbers of FTDI RS232 adapters
 # Ensures that the correct port is picked even if the device node changes randomly.
 SERIAL_NO_LED   = 'FTCYSOO2'
@@ -61,12 +63,12 @@ MAX_GAMMA = 2.0
 
 FOCUS_MAX_HISTORY = 2000
 FOCUS_SLOPE_SEARCH_STEPS = 6
-FOCUS_STEP_UM = 5.0 # piezo step in UM
+FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
 FOCUS_SAMPLE_DURATION_S = 1.0
-FOCUS_SAMPLE_DURATION_SAMPLES = 5
+FOCUS_MIN_SAMPLES = 5
 FOCUS_PIEZO_SETTLING_S = 0.2 # empirically determined settling time
-FOCUS_VARIANCE_THRESH = 10.0 # 1-sigma acceptable deviation for focus data
-FOCUS_MAX_RETRIES = 4
+FOCUS_VARIANCE_THRESH = 8.0 # 1-sigma acceptable deviation for focus data
+FOCUS_MAX_RETRIES = 10
 FOCUS_MAX_EXCURSION_MM = 0.2
 FOCUS_STEPS_MARGIN = 2 # minimum number of steps required to define one side of the focus curve
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
@@ -111,15 +113,25 @@ class ImageNamer:
 
 # evaluate if the collected focus data meets our quality requirements
 # returns True if the data is usable
+# returns False if more data should be collected. Bad data is removed from the set.
 def is_focus_good(step_data):
     mean = step_data['focus'].mean()
-    out_of_range = step_data[
-            (step_data['focus'] < mean - FOCUS_VARIANCE_THRESH * 3)
+    logging.debug(f"{step_data[['focus', 'quality']]}")
+    logging.debug(f"mean: {mean}")
+    step_data.loc[:, 'quality'] = 'good'
+    out_of_range_indices = \
+            (step_data['focus'] < mean - FOCUS_VARIANCE_THRESH * 3) \
             | (step_data['focus'] > mean + FOCUS_VARIANCE_THRESH * 3)
-        ]
-    if len(out_of_range) > 0:
-        logging.warning(f"Greater than 3-sigma variation detected on focus data: {len(out_of_range)} points")
-    return len(out_of_range) == 0
+    step_data.loc[out_of_range_indices, 'quality'] = 'bad'
+    num_bad = len(step_data[out_of_range_indices])
+    if len(step_data) - num_bad < FOCUS_MIN_SAMPLES:
+        logging.warning(f"Greater than 3-sigma variation detected on focus data: {num_bad} of {len(step_data)} are out of range")
+        logging.debug(f"{step_data[['focus', 'quality']]}")
+        return False, None, None
+    else:
+        good_data = step_data[step_data['quality'] == 'good']
+        logging.info(f"{good_data}")
+        return True, good_data['focus'].mean(), good_data['focus'].std()
 
 # Split a total Z value into a jubilee and piezo setting
 def partition_z(zp, cur_jubilee_z):
@@ -150,8 +162,7 @@ def total_z_mm_from_parts(jub_z, piezo_code):
 # ParamTracker tracks a parameter over successive calls to `update()`.
 # When the parameter stops changing, the `action` function is invoked.
 class ParamTracker():
-    def __init__(self, iris, action):
-        self.iris = iris
+    def __init__(self, action):
         self.action = action
         self.param = None # uninit state
         self.last_param = None
@@ -201,6 +212,8 @@ class Iris():
         self.jubilee_state = jubilee_state
         self.fine_focus_event = fine_focus_event
 
+        # only setup the focus_df as the shared value between the main loop and the focus routine
+        # the rest of the focus variables should be setup in the focus "IDLE" state
         self.focus_df = pd.DataFrame({
             "time" : [],  # datetime at time of measurement
             "focus" : [], # raw value of variance of laplacian of focus area
@@ -210,10 +223,6 @@ class Iris():
             "quality" : [], # quality check metric: unchecked, good, bad
         })
         self.focus_state = "IDLE"
-        self.step_start = datetime.datetime.now()
-        self.focus_steps = 0
-        self.focus_retries = 0
-        self.step_direction = 1 # 1 or -1 for increase or decreasing step
 
     def all_leds_off(self):
         # turn off all controller LEDs
@@ -374,38 +383,45 @@ class Iris():
             logging.info("Got fine focus request")
             self.focus_state = "FIND_SLOPE"
             self.focus_steps = 0
-            curve_df = pd.DataFrame({
+            self.focus_retries = 0
+
+            self.curve_df = pd.DataFrame({
                 "piezo" : [],
                 "z" : [],
                 "focus_mean" : [],
                 "focus_var" : [],
-                "total z" : []
+                "total_z" : []
             })
             self.step_start = datetime.datetime.now()
-            focus_starting_z = self.jubilee.z
-            focus_starting_piezo = self.piezo.code
-            absolute_starting_z_mm = self.total_z_mm()
+            self.focus_steps = 0
+            self.focus_retries = 0
+            self.step_direction = 1 # 1 or -1 for increase or decreasing piezo code value (note impact on z has opposite sign :-/)
+
+            self.focus_starting_z = self.jubilee.z
+            self.focus_starting_piezo = self.piezo.code
+            self.absolute_starting_z_mm = self.total_z_mm()
         elif self.focus_state == "FIND_SLOPE":
             # safety check
-            if self.total_z_mm() > absolute_starting_z_mm + FOCUS_MAX_EXCURSION_MM or \
-            self.total_z_mm() < absolute_starting_z_mm - FOCUS_MAX_EXCURSION_MM:
+            if self.total_z_mm() > self.absolute_starting_z_mm + FOCUS_MAX_EXCURSION_MM or \
+            self.total_z_mm() < self.absolute_starting_z_mm - FOCUS_MAX_EXCURSION_MM:
                 logging.error("Focus run aborted, Z-excursion limit reached!")
                 self.focus_state = "EXIT"
-            if (datetime.datetime.now() - self.step_start).total_seconds() > FOCUS_SAMPLE_DURATION_S:
+            if (datetime.datetime.now() - self.step_start).total_seconds() > FOCUS_SAMPLE_DURATION_S * (self.focus_retries + 1):
                 logging.info(f"focus step {self.focus_steps}")
 
-                step_data = self.focus_df[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S))]
-                if is_focus_good(step_data):
+                step_data = self.focus_df[(self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S))) \
+                                          & (self.focus_df['quality'] != 'bad')]
+                is_good, mean, var = is_focus_good(step_data)
+                if is_good:
                     # store data
                     self.focus_retries = 0
                     # have to re-index to not be working on a copy of the data
-                    self.focus_df.loc[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'good'
-                    logging.info(f"Step {self.piezo.code} var: {step_data['focus'].std()}, mean: {step_data['focus'].mean()}, len: {len(step_data['focus'])}")
-                    curve_df.loc[len(curve_df)] = [
+                    logging.info(f"Step {self.piezo.code} var: {var}, mean: {mean}, len: {len(step_data['focus'])}")
+                    self.curve_df.loc[len(self.curve_df)] = [
                         self.piezo.code,
                         self.jubilee.z,
-                        step_data['focus'].mean(),
-                        step_data['focus'].std(),
+                        mean,
+                        var,
                         self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
                     ]
                     # nudge by 5um
@@ -438,25 +454,26 @@ class Iris():
                     if self.focus_steps > FOCUS_SLOPE_SEARCH_STEPS:
                         self.focus_state = "ANALYZE_SLOPE"
                 else:
-                    self.focus_df.loc[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'bad'
-                    self.step_start = datetime.datetime.now()
+                    # remove the out of range data from the source self.focus_df dataframe
                     self.focus_retries += 1
                     if self.focus_retries > FOCUS_MAX_RETRIES:
+                        self.focus_df.loc[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'bad'
                         logging.error("Data quality too low for autofocus. Aborting run. Check for excessive environment vibration or camera noise.")
                         self.focus_state = "EXIT"
+
         elif self.focus_state == "ANALYZE_SLOPE":
-            sorted_curve = curve_df.sort_values(by="total z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
+            sorted_curve = self.curve_df.sort_values(by="total_z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
             max_row = sorted_curve.reset_index(drop=True)['focus_mean'].idxmax()
-            if max_row >= len(curve_df) - FOCUS_STEPS_MARGIN:
+            if max_row >= len(self.curve_df) - FOCUS_STEPS_MARGIN:
                 # best focus is toward highest total Z
                 #  -> lower the piezo code to increase total Z more
                 if self.step_direction != -1:
-                    self.piezo.set_code(focus_starting_piezo)
-                    self.jubilee.set_axis('z', focus_starting_z)
+                    self.piezo.set_code(self.focus_starting_piezo)
+                    self.jubilee.set_axis('z', self.focus_starting_z)
                     self.step_direction = -1
                 else:
-                    focus_starting_piezo = self.piezo.code
-                    focus_starting_z = self.jubilee.z
+                    self.focus_starting_piezo = self.piezo.code
+                    self.focus_starting_z = self.jubilee.z
                 self.focus_steps = 0
                 self.step_start = datetime.datetime.now()
                 self.focus_state = "FIND_SLOPE"
@@ -464,25 +481,31 @@ class Iris():
                 # best focus is toward lowest total Z
                 #  -> raise the piezo code to reduce totalZ more
                 if self.step_direction != 1:
-                    self.piezo.set_code(focus_starting_piezo)
-                    self.jubilee.set_axis('z', focus_starting_z)
+                    self.piezo.set_code(self.focus_starting_piezo)
+                    self.jubilee.set_axis('z', self.focus_starting_z)
                     self.step_direction = 1
                 else:
-                    focus_starting_piezo = self.piezo.code
-                    focus_starting_z = self.jubilee.z
+                    self.focus_starting_piezo = self.piezo.code
+                    self.focus_starting_z = self.jubilee.z
                 self.focus_steps = 0
                 self.step_start = datetime.datetime.now()
                 self.focus_state = "FIND_SLOPE"
             else:
                 # fit to 2nd order and find maxima
-                coefficients = np.polyfit(curve_df['total z'], curve_df['focus_mean'], deg=2)
-                logging.info(curve_df['total z'])
-                logging.info(curve_df['focus_mean'])
+                coefficients = np.polyfit(self.curve_df['total_z'], self.curve_df['focus_mean'], deg=2)
+                logging.debug(self.curve_df['total_z'])
+                logging.debug(self.curve_df['focus_mean'])
                 logging.info(f"coefficients: {coefficients}")
                 z_maxima = -coefficients[1] / (2 * coefficients[0])
-                if z_maxima < curve_df['total z'].min() - AUTOFOCUS_SAFETY_MARGIN_MM \
-                or z_maxima > curve_df['total z'].max() + AUTOFOCUS_SAFETY_MARGIN_MM:
-                    logging.error(f"Computed focus is bogus: {z_maxima:0.3f}, [{curve_df['total z'].min():0.3f}, {curve_df['total z'].max():0.3f}]")
+                plt.scatter(self.curve_df['total_z'], self.curve_df['focus_mean'])
+                xp = np.linspace(self.curve_df['total_z'].min() - 0.01, self.curve_df['total_z'].max() + 0.01, 100)
+                yp = np.polyval(coefficients, xp)
+                plt.plot(xp, yp)
+                plt.savefig("focus_fit.png", dpi=300)
+
+                if z_maxima < self.curve_df['total_z'].min() - AUTOFOCUS_SAFETY_MARGIN_MM \
+                or z_maxima > self.curve_df['total_z'].max() + AUTOFOCUS_SAFETY_MARGIN_MM:
+                    logging.error(f"Computed focus is bogus: {z_maxima:0.3f}, [{self.curve_df['total_z'].min():0.3f}, {self.curve_df['total_z'].max():0.3f}]")
                 else:
                     # servo machine to maxima
                     logging.info(f"Focus point at {z_maxima:0.3f}mm")
@@ -498,9 +521,23 @@ class Iris():
             self.fine_focus_event.clear()
             self.focus_state = "IDLE"
             self.focus_df.to_csv("focus.csv")
-            curve_df.to_csv("curve.csv")
+            self.curve_df.to_csv("curve.csv")
         else:
             logging.warning("Unrecognized focus state: f{self.focus_state}")
+
+    def local_angle_action(self, val):
+        self.light.set_angle_from_control(val, 'local')
+    def remote_angle_action(self, val):
+        self.light.set_angle_from_control(val, 'remote')
+    def rotation_action(self, val):
+        r = (float(val) / 127.0) * \
+                            (CONTROL_MAX_ROTATION_ANGLE - CONTROL_MIN_ROTATION_ANGLE) + CONTROL_MIN_ROTATION_ANGLE
+        self.jubilee.set_rotation(r)
+    def piezo_action(self, val):
+        nudge = float(val) * (MAX_PIEZO / 127.0)
+        self.piezo.set_code(int(nudge))
+        poi = self.current_pos_as_poi()
+        self.jubilee_state.put(poi, block=False)
 
     def loop(self):
         # clear any stray events in the queue
@@ -530,28 +567,13 @@ class Iris():
 
         # track state for commands that should not issue until the knob stops moving
         trackers = []
-        local_angle_tracker = ParamTracker(
-            self,
-            lambda val: self.iris.set_angle_from_control(val, 'local')
-        )
+        local_angle_tracker = ParamTracker(self.local_angle_action)
         trackers += [local_angle_tracker]
-        remote_angle_tracker = ParamTracker(
-            self,
-            lambda val: self.iris.set_angle_from_control(val, 'remote')
-        )
+        remote_angle_tracker = ParamTracker(self.remote_angle_action)
         trackers += [remote_angle_tracker]
-        def rotation_action(val):
-            r = (float(val) / 127.0) * \
-                                (CONTROL_MAX_ROTATION_ANGLE - CONTROL_MIN_ROTATION_ANGLE) + CONTROL_MIN_ROTATION_ANGLE
-            self.iris.jubilee.set_rotation(r)
-        rotation_tracker = ParamTracker(self, rotation_action)
+        rotation_tracker = ParamTracker(self.rotation_action)
         trackers += [rotation_tracker]
-        def piezo_action(val):
-            nudge = float(val) * (MAX_PIEZO / 127.0)
-            self.iris.piezo.set_code(int(nudge))
-            poi = self.iris.current_pos_as_poi()
-            self.iris.jubilee_state.put(poi, block=False)
-        piezo_tracker = ParamTracker(self, piezo_action)
+        piezo_tracker = ParamTracker(self.piezo_action)
         trackers += [piezo_tracker]
 
         profiling = False
