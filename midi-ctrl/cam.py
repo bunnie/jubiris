@@ -38,8 +38,8 @@ FOCUS_AREA_PX = 1536
 GRAPH_WINDOW = 50
 USE_GAMMA = False
 
-INIT_EXPO_TIME=160
-INIT_EXPO_GAIN=100
+INIT_EXPO_TIME=60
+INIT_EXPO_GAIN=300
 INIT_TEMP=6100
 INIT_TINT=1880
 
@@ -499,7 +499,8 @@ class MainWindow(QMainWindow):
             try:
                 score = abs(laplacian.var())
                 self.focus_scores.append(score)
-                self.focus_queue.put((datetime.now(), score), block=False)
+                if not self.focus_queue.full():
+                    self.focus_queue.put((datetime.now(), score, self.spinbox_expoGain.value(), self.spinbox_expoTime.value()), block=False)
                 self.focus_variance.setText(f"{statistics.stdev(list(self.focus_scores)):0.2f}")
             except ValueError:
                 logging.debug("Laplacian had 0 variance, inserting bogus value for focus")
@@ -559,17 +560,18 @@ class MainWindow(QMainWindow):
             self.spinbox_expoGain.setValue(gain)
 
     def handleStillImageEvent(self):
-        curtime = self.hcam.get_ExpoTime() * 1000
+        curtime_us = self.hcam.get_ExpoTime()
         curgain = self.hcam.get_ExpoAGain()
         # Set gain to 100 for minumum noise
         new_gain = 100
-        self.hcam.put_ExpoAGain(new_gain)
         # compensate for lower gain with longer exposure time
-        new_exp = int(2.0 * curtime * (curgain / new_gain))
-        self.hcam.put_ExpoTime(new_exp)
+        new_exp = int(2.0 * curtime_us * (curgain / new_gain))
         if not self.oneshot_expo_print:
             logging.info(f"Capture at gain={new_gain}, exp={new_exp}")
             self.oneshot_expo_print = True
+
+        self.hcam.put_ExpoAGain(new_gain)
+        self.hcam.put_ExpoTime(new_exp)
         info = toupcam.ToupcamFrameInfoV3()
         try:
             self.hcam.PullImageV3(None, 1, 32, 0, info) # peek
@@ -596,8 +598,8 @@ class MainWindow(QMainWindow):
                             gamma_image.save("pyqt-gamma{}.jpg".format(self.count), None, 90)
 
                         self.hcam.put_ExpoAGain(curgain)
-                        self.hcam.put_ExpoTime(curtime)
-                        logging.debug(f"Revert gain={curgain}, exp={curtime}")
+                        self.hcam.put_ExpoTime(curtime_us)
+                        logging.debug(f"Revert gain={curgain}, exp={curtime_us}")
                     else:
                         if self.image_name.is_init():
                             # ensure that the target directory exists
@@ -616,7 +618,7 @@ class MainWindow(QMainWindow):
                                 p = Path(fname)
                                 p.unlink(missing_ok=True)
                             self.hcam.put_ExpoAGain(curgain)
-                            self.hcam.put_ExpoTime(curtime)
+                            self.hcam.put_ExpoTime(curtime_us)
                         else:
                             logging.error("Image name was not fully initalized, cannot save!")
                         self.single_snap_done.set()
