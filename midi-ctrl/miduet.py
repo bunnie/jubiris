@@ -127,7 +127,7 @@ def all_leds_off(schema, midi):
 def is_focus_good(step_data):
     mean = step_data['focus'].mean()
     out_of_range = step_data[
-            (step_data['focus'] < mean - FOCUS_VARIANCE_THRESH * 3) 
+            (step_data['focus'] < mean - FOCUS_VARIANCE_THRESH * 3)
             | (step_data['focus'] > mean + FOCUS_VARIANCE_THRESH * 3)
         ]
     if len(out_of_range) > 0:
@@ -179,7 +179,7 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
 
     if light.is_1050_set():
         midi.set_led_state(int(schema['1050 button'].replace('note=', '')), True)
-    
+
     # track state for commands that should not issue until the knob stops moving
     local_angle_changed = False
     remote_angle_changed = False
@@ -215,7 +215,7 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
         if cam_quit.is_set():
             all_leds_off(schema, midi)
             return
-        
+
         # Drain the focus queue
         # Note to self: variance of a static image is <5. Table vibration > 300 deviation. Focus changes ~100 deviation.
         while not focus_queue.empty():
@@ -227,7 +227,7 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
             focus_df.loc[len(focus_df)] = [t, f, focus_state, piezo.code, z_checked, "unchecked"]
             if len(focus_df) > FOCUS_MAX_HISTORY:
                 focus_df.drop(index=0, inplace=True)
-        
+
         if fine_focus_event.is_set():
             if not jubilee.is_on():
                 logging.warning("Machine is not on, please turn on motors before attempting to focus!")
@@ -439,7 +439,7 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
                     elif name == "gamma":
                         last_gamma = (float(control_value) / 127.0) * MAX_GAMMA
                         if gamma_enabled:
-                            gamma.gamma = last_gamma 
+                            gamma.gamma = last_gamma
                         else:
                             gamma.gamma = 1.0
                     elif name == "rotation":
@@ -679,7 +679,7 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
 
                             else:
                                 logging.error("Unrecognized automation type, doing nothing.")
-                            
+
                             logging.info("Automation done!")
 
                     elif 'note_off' in str(msg):
@@ -689,7 +689,7 @@ def loop(args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
                                 if paused_axis in name:
                                     refvals[name] = None
                             paused_axis = None
-        
+
         if profiling:
             logging.info(f"parse {datetime.datetime.now() - start}")
         # now update machine position based on values
@@ -887,7 +887,7 @@ def main():
             jubilee_port = port
 
     logging.info(f"Found LED on {led_port}, piezo on {piezo_port}\nmot0 on {mot0_port}, mot1 on {mot1_port}, jubilee on {jubilee_port}")
-    
+
     # Automatically pick a MIDI device, or take one from command line if specified
     if args.midi_port is None:
         input_list = mido.get_input_names()
