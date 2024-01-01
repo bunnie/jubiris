@@ -29,7 +29,7 @@ class Jubilee:
         except serial.SerialException as e:
             logging.error(f"Serial error: {e}")
             return None
-    
+
     def update_port(self, port):
         self.port = port
         try:
@@ -76,7 +76,7 @@ class Jubilee:
         else:
             print('axis not yet implemented')
         return self.sync_to_mach()
-    
+
     # sets one axis to a value. Only has an effect if the value changes
     # the machine state versus the current recorded state. This is because
     # re-writing the same value to the machine can still cause the microstepping
@@ -105,15 +105,15 @@ class Jubilee:
                 updated = True
         else:
             print('axis not yet implemented')
-        
+
         if updated:
             return self.sync_to_mach()
         else: # if the value is a no-op, don't send the command.
             return True
-    
+
     def get_rotation(self):
         return self.r
-    
+
     def set_rotation(self, degrees):
         if self.is_on():
             if degrees < MIN_ROTATION_ANGLE or degrees > MAX_ROTATION_ANGLE:
@@ -123,7 +123,7 @@ class Jubilee:
             return self.send_cmd(f'G1 V{self.r:0.2f} H4')  # terminates movement on endstop
         else:
             return None
-    
+
     def goto(self, xyz_tuple):
         if not self.is_on():
             return False # don't return an error, just silently fail
@@ -132,7 +132,7 @@ class Jubilee:
         self.y = y
         self.z = z
         return self.sync_to_mach()
-    
+
     # takes our self.x/y/z and sends it to the machine. Also handles any global axis swapping
     def sync_to_mach(self):
         # NOTE axis swap is implemented at sync_to_mach
@@ -148,10 +148,10 @@ class Jubilee:
         self.r = None
         self.state = 'OFF'
         return self.send_cmd('M18')
-    
+
     def is_on(self):
         return self.state == 'ON'
-    
+
     def motors_on_set_zero(self):
         self.send_cmd('G92 X0 Y0 Z10 U0 V0') # declare this position as origin
         self.x = 0.0
@@ -168,7 +168,7 @@ class Jubilee:
         self.y = None
         self.z = None
         self.state = 'ESTOP'
-    
+
     def restart(self):
         self.send_cmd('M999')
         time.sleep(8) # enough time to boot?? TODO: there is probably a smarter way to watch for the boot condition
@@ -200,7 +200,7 @@ class Jubilee:
         logging.debug(f"Recalling to POI {index}: {self.x}, {self.y}, {self.z}")
         self.sync_to_mach()
         return poi.piezo
-            
+
     def __exit__(self, exc_type, exc_value, traceback):
         if self.ser.is_open:
             self.motors_off()
