@@ -121,9 +121,6 @@ def is_focus_good(step_data):
         logging.warning(f"Greater than 3-sigma variation detected on focus data: {len(out_of_range)} points")
     return len(out_of_range) == 0
 
-def total_z_mm(z_mm, piezo_code):
-    return z_mm - (piezo_code * PIEZO_UM_PER_LSB) / 1000.0
-
 # Split a total Z value into a jubilee and piezo setting
 def partition_z(zp, cur_jubilee_z):
     if cur_jubilee_z - zp > 0 and cur_jubilee_z - zp < (PIEZO_MAX_CODE * PIEZO_UM_PER_LSB / 1000):
@@ -147,13 +144,48 @@ def quitter(jubilee, light, piezo, cam_quit):
     piezo.set_code(0)
     logging.info("Safe quit reached!")
 
+def total_z_mm_from_parts(jub_z, piezo_code):
+    return jub_z - (piezo_code * PIEZO_UM_PER_LSB) / 1000.0
+
+# ParamTracker tracks a parameter over successive calls to `update()`.
+# When the parameter stops changing, the `action` function is invoked.
+class ParamTracker():
+    def __init__(self, iris, action):
+        self.iris = iris
+        self.action = action
+        self.param = None # uninit state
+        self.last_param = None
+        self.is_changing = False
+
+    def update(self, val):
+        self.param = val
+        self.is_changing = True
+
+    def poll(self):
+        if self.is_changing:
+            if self.param == self.last_param:
+                self.action(self.param)
+                self.is_changing = False
+        self.last_param = self.param
+
 # primary control loop for IRIS
 class Iris():
     def __init__(self,
-        args, stepsize, jubilee, midi, light, piezo, gamma, image_name,
+        # all args except for args is shared state with other threads
+        args, jubilee, midi, light, piezo, gamma, image_name,
         auto_snap_done, auto_snap_event, schema,
         focus_queue, jubilee_state, fine_focus_event
     ):
+        if args.mag == 5:
+            stepsize = 0.5
+        elif args.mag == 10:
+            stepsize = 0.3
+        elif args.mag == 20:
+            stepsize = 0.1
+        else:
+            logging.error("Magnification must be one of [5, 10, 20]")
+            exit(0)
+
         self.args = args
         self.stepsize = stepsize
         self.jubilee = jubilee
@@ -169,6 +201,20 @@ class Iris():
         self.jubilee_state = jubilee_state
         self.fine_focus_event = fine_focus_event
 
+        self.focus_df = pd.DataFrame({
+            "time" : [],  # datetime at time of measurement
+            "focus" : [], # raw value of variance of laplacian of focus area
+            "state" : [], # the state of the focus machine at the time of the measuremen
+            "piezo" : [], # raw piezo code
+            "z" : [],     # z-motor height
+            "quality" : [], # quality check metric: unchecked, good, bad
+        })
+        self.focus_state = "IDLE"
+        self.step_start = datetime.datetime.now()
+        self.focus_steps = 0
+        self.focus_retries = 0
+        self.step_direction = 1 # 1 or -1 for increase or decreasing step
+
     def all_leds_off(self):
         # turn off all controller LEDs
         for control_node in self.schema.values():
@@ -176,6 +222,285 @@ class Iris():
                 if 'note=' in control_node:
                     note_id = int(control_node.split('=')[1])
                     self.midi.set_led_state(note_id, False)
+
+    def current_pos_as_poi(self):
+        return Poi(self.jubilee.x, self.jubilee.y, self.jubilee.z, self.piezo.code)
+
+    def total_z_mm(self):
+        return self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
+
+    def set_image_name(self):
+        self.image_name.x = self.jubilee.x
+        self.image_name.y = self.jubilee.y
+        self.image_name.z = self.jubilee.z
+        self.image_name.p = self.piezo.code
+        self.image_name.i = self.light.intensity_local
+        self.image_name.t = self.light.angle_local
+        self.image_name.j = self.light.intensity_remote
+        self.image_name.u = self.light.angle_remote
+        self.image_name.a = self.jubilee.r
+        self.image_name.cur_rep = None
+        self.image_name.rep = self.args.reps
+
+    def automate_flat_image(self):
+        # check that the POIs have been set
+        if self.jubilee.poi[0] is None or self.jubilee.poi[1] is None:
+            logging.warning("POIs have not been set, can't automate!")
+            return
+        if self.jubilee.poi[2] is None:
+            # simplify edge cases by just duplicating to create our third POI
+            self.jubilee.poi[2] = self.jubilee.poi[1]
+        # plan the path of steps
+        min_x = min([i.x for i in self.jubilee.poi])
+        max_x = max([i.x for i in self.jubilee.poi])
+        min_y = min([i.y for i in self.jubilee.poi])
+        max_y = max([i.y for i in self.jubilee.poi])
+
+        x_path = np.arange(min_x, max_x, self.stepsize)
+        if len(x_path) == 0: # this happens if min == max
+            x_path = [min_x]
+        # make sure we include the end interval in the photo region
+        if max(x_path) < max_x:
+            x_path = np.append(x_path, max(x_path) + self.stepsize)
+        # These fail due to floating point rounding errors :P
+        # assert(max(x_path) >= max_x)
+        y_path = np.arange(min_y, max_y, self.stepsize)
+        if len(y_path) == 0: # handle min == max
+            y_path = [min_y]
+        # make sure we include the end interval in the photo region
+        if max(y_path) < max_y:
+            y_path = np.append(y_path, max(y_path) + self.stepsize)
+        # assert(max(y_path) >= max_y)
+
+        # derive Z-plane equation
+        p = []
+        for i in range(3):
+            p += [np.array((self.jubilee.poi[i].x, self.jubilee.poi[i].y,
+                            total_z_mm_from_parts(self.jubilee.poi[i].z, self.jubilee.poi[i].piezo)))]
+
+        if np.array_equal(p[1], p[2]):
+            p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+            p[2][1] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+
+        v1 = p[1] - p[0]
+        v2 = p[2] - p[0]
+        normal_vector = np.cross(v1, v2)
+        a, b, c = normal_vector
+        d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
+
+        logging.info(f"stepping x {x_path}")
+        logging.info(f"stepping y {y_path}")
+
+        for x in x_path:
+            for y in y_path:
+                # derive composite-z
+                zp = -(a * x + b * y + d) / c
+
+                # Compute Z partition
+                (z, p_lsb) = partition_z(zp, self.jubilee.z)
+
+                # check values
+                if p_lsb > PIEZO_MAX_CODE:
+                    logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
+                    continue
+                if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
+                    logging.warning(f"Z value seems hazardous, aborting step: {z}")
+                    continue
+                if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
+                    logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
+                    continue
+
+                logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
+                self.jubilee.goto((x, y, z))
+                self.piezo.set_code(p_lsb)
+
+                # setup the image_name object
+                self.set_image_name()
+                # wait for system to settle
+                logging.info(f"settling for {self.args.settling}s")
+                time.sleep(self.args.settling)
+                # this should trigger the picture
+                logging.info(f"triggering photos")
+                self.auto_snap_event.set()
+                self.auto_snap_done.wait()
+                logging.info(f"got photo done event")
+                # reset the flags
+                self.auto_snap_event.clear()
+                self.auto_snap_done.clear()
+
+    def automate_psi_image(self):
+        psi_base = self.jubilee.get_rotation()
+        for delta_psi in range(0, 95, 1):
+            self.jubilee.set_rotation(psi_base + delta_psi)
+            self.set_image_name()
+            # wait for system to settle
+            logging.info(f"settling for {self.args.settling}s")
+            time.sleep(self.args.settling)
+            # this should trigger the picture
+            logging.info(f"triggering photos")
+            self.auto_snap_event.set()
+            self.auto_snap_done.wait()
+            logging.info(f"got photo done event")
+            # reset the flags
+            self.auto_snap_event.clear()
+            self.auto_snap_done.clear()
+
+    def automate_theta_image(self):
+        for theta in range(0, 127, 2):
+            self.light.set_angle_from_control(theta, 'remote')
+            self.set_image_name()
+            # wait for system to settle
+            logging.info(f"settling for {self.args.settling}s")
+            time.sleep(self.args.settling)
+            # this should trigger the picture
+            logging.info(f"triggering photos")
+            self.auto_snap_event.set()
+            self.auto_snap_done.wait()
+            logging.info(f"got photo done event")
+            # reset the flags
+            self.auto_snap_event.clear()
+            self.auto_snap_done.clear()
+
+    # Runs a full focus sweep. Requires that the user makes some effort to bring the piece
+    # "somewhat" into focus.
+    def fine_focus(self):
+        if not self.jubilee.is_on():
+            logging.warning("Machine is not on, please turn on motors before attempting to focus!")
+            self.fine_focus_event.clear()
+            return
+
+        # do the fine focus algorithm
+        if self.focus_state == "IDLE":
+            logging.info("Got fine focus request")
+            self.focus_state = "FIND_SLOPE"
+            self.focus_steps = 0
+            curve_df = pd.DataFrame({
+                "piezo" : [],
+                "z" : [],
+                "focus_mean" : [],
+                "focus_var" : [],
+                "total z" : []
+            })
+            self.step_start = datetime.datetime.now()
+            focus_starting_z = self.jubilee.z
+            focus_starting_piezo = self.piezo.code
+            absolute_starting_z_mm = self.total_z_mm()
+        elif self.focus_state == "FIND_SLOPE":
+            # safety check
+            if self.total_z_mm() > absolute_starting_z_mm + FOCUS_MAX_EXCURSION_MM or \
+            self.total_z_mm() < absolute_starting_z_mm - FOCUS_MAX_EXCURSION_MM:
+                logging.error("Focus run aborted, Z-excursion limit reached!")
+                self.focus_state = "EXIT"
+            if (datetime.datetime.now() - self.step_start).total_seconds() > FOCUS_SAMPLE_DURATION_S:
+                logging.info(f"focus step {self.focus_steps}")
+
+                step_data = self.focus_df[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S))]
+                if is_focus_good(step_data):
+                    # store data
+                    self.focus_retries = 0
+                    # have to re-index to not be working on a copy of the data
+                    self.focus_df.loc[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'good'
+                    logging.info(f"Step {self.piezo.code} var: {step_data['focus'].std()}, mean: {step_data['focus'].mean()}, len: {len(step_data['focus'])}")
+                    curve_df.loc[len(curve_df)] = [
+                        self.piezo.code,
+                        self.jubilee.z,
+                        step_data['focus'].mean(),
+                        step_data['focus'].std(),
+                        self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
+                    ]
+                    # nudge by 5um
+                    last_code = self.piezo.code
+                    nudge = FOCUS_STEP_UM / PIEZO_UM_PER_LSB
+                    next_code = int(nudge * self.step_direction + last_code) # positive step direction => negative z-height
+
+                    # step if possible; if not adjust Z-axis. this might be dubious due to z-axis inaccuracy
+                    # (may be better to just determine the overall range prior to focus sweep and try to center things up)
+                    if self.piezo.is_code_valid(next_code):
+                        self.piezo.set_code(next_code)
+                    else:
+                        if next_code > PIEZO_MAX_CODE / 2: # going too high
+                            # z-axis has mapping of lower values are closer to objective, so subtract a min step
+                            self.jubilee.step_axis('z', -MIN_JUBILEE_STEP_MM)
+                            # recalculate the next code
+                            next_code = last_code - (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
+                            self.piezo.set_code(next_code)
+                        else: # going too low
+                            self.jubilee.step_axis('z', MIN_JUBILEE_STEP_MM)
+                            next_code = last_code + (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
+                            self.piezo.set_code(next_code)
+
+                    # report to UI
+                    poi = self.current_pos_as_poi()
+                    self.jubilee_state.put(poi, block=False)
+                    # prep next step
+                    self.step_start = datetime.datetime.now()
+                    self.focus_steps += 1
+                    if self.focus_steps > FOCUS_SLOPE_SEARCH_STEPS:
+                        self.focus_state = "ANALYZE_SLOPE"
+                else:
+                    self.focus_df.loc[self.focus_df['time'] >= (self.step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'bad'
+                    self.step_start = datetime.datetime.now()
+                    self.focus_retries += 1
+                    if self.focus_retries > FOCUS_MAX_RETRIES:
+                        logging.error("Data quality too low for autofocus. Aborting run. Check for excessive environment vibration or camera noise.")
+                        self.focus_state = "EXIT"
+        elif self.focus_state == "ANALYZE_SLOPE":
+            sorted_curve = curve_df.sort_values(by="total z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
+            max_row = sorted_curve.reset_index(drop=True)['focus_mean'].idxmax()
+            if max_row >= len(curve_df) - FOCUS_STEPS_MARGIN:
+                # best focus is toward highest total Z
+                #  -> lower the piezo code to increase total Z more
+                if self.step_direction != -1:
+                    self.piezo.set_code(focus_starting_piezo)
+                    self.jubilee.set_axis('z', focus_starting_z)
+                    self.step_direction = -1
+                else:
+                    focus_starting_piezo = self.piezo.code
+                    focus_starting_z = self.jubilee.z
+                self.focus_steps = 0
+                self.step_start = datetime.datetime.now()
+                self.focus_state = "FIND_SLOPE"
+            elif max_row < FOCUS_STEPS_MARGIN:
+                # best focus is toward lowest total Z
+                #  -> raise the piezo code to reduce totalZ more
+                if self.step_direction != 1:
+                    self.piezo.set_code(focus_starting_piezo)
+                    self.jubilee.set_axis('z', focus_starting_z)
+                    self.step_direction = 1
+                else:
+                    focus_starting_piezo = self.piezo.code
+                    focus_starting_z = self.jubilee.z
+                self.focus_steps = 0
+                self.step_start = datetime.datetime.now()
+                self.focus_state = "FIND_SLOPE"
+            else:
+                # fit to 2nd order and find maxima
+                coefficients = np.polyfit(curve_df['total z'], curve_df['focus_mean'], deg=2)
+                logging.info(curve_df['total z'])
+                logging.info(curve_df['focus_mean'])
+                logging.info(f"coefficients: {coefficients}")
+                z_maxima = -coefficients[1] / (2 * coefficients[0])
+                if z_maxima < curve_df['total z'].min() - AUTOFOCUS_SAFETY_MARGIN_MM \
+                or z_maxima > curve_df['total z'].max() + AUTOFOCUS_SAFETY_MARGIN_MM:
+                    logging.error(f"Computed focus is bogus: {z_maxima:0.3f}, [{curve_df['total z'].min():0.3f}, {curve_df['total z'].max():0.3f}]")
+                else:
+                    # servo machine to maxima
+                    logging.info(f"Focus point at {z_maxima:0.3f}mm")
+                    (new_z, new_piezo) = partition_z(z_maxima, self.jubilee.z)
+                    self.jubilee.set_axis('z', new_z)
+                    self.piezo.set_code(new_piezo)
+
+                # check focus score
+                self.focus_state = "EXIT"
+
+        elif self.focus_state == "EXIT":
+            # Call this when we're done with fine focus algo...
+            self.fine_focus_event.clear()
+            self.focus_state = "IDLE"
+            self.focus_df.to_csv("focus.csv")
+            curve_df.to_csv("curve.csv")
+        else:
+            logging.warning("Unrecognized focus state: f{self.focus_state}")
 
     def loop(self):
         # clear any stray events in the queue
@@ -204,32 +529,30 @@ class Iris():
             self.midi.set_led_state(int(self.schema['1050 button'].replace('note=', '')), True)
 
         # track state for commands that should not issue until the knob stops moving
-        local_angle_changed = False
-        remote_angle_changed = False
-        last_local_angle_control_value = 0.0
-        new_local_angle_control_value = 0.0
-        last_remote_angle_control_value = 0.0
-        new_remote_angle_control_value = 0.0
-        rotation_changed = False
-        last_rotation_value = 0.0
-        new_rotation_value = 0.0
-        piezo_changed = False
-        last_piezo_value = 0.0
-        new_piezo_value = 0.0
-
-        focus_df = pd.DataFrame({
-            "time" : [],  # datetime at time of measurement
-            "focus" : [], # raw value of variance of laplacian of focus area
-            "state" : [], # the state of the focus machine at the time of the measuremen
-            "piezo" : [], # raw piezo code
-            "z" : [],     # z-motor height
-            "quality" : [], # quality check metric: unchecked, good, bad
-        })
-        focus_state = "IDLE"
-        step_start = datetime.datetime.now()
-        focus_steps = 0
-        focus_retries = 0
-        step_direction = 1 # 1 or -1 for increase or decreasing step
+        trackers = []
+        local_angle_tracker = ParamTracker(
+            self,
+            lambda val: self.iris.set_angle_from_control(val, 'local')
+        )
+        trackers += [local_angle_tracker]
+        remote_angle_tracker = ParamTracker(
+            self,
+            lambda val: self.iris.set_angle_from_control(val, 'remote')
+        )
+        trackers += [remote_angle_tracker]
+        def rotation_action(val):
+            r = (float(val) / 127.0) * \
+                                (CONTROL_MAX_ROTATION_ANGLE - CONTROL_MIN_ROTATION_ANGLE) + CONTROL_MIN_ROTATION_ANGLE
+            self.iris.jubilee.set_rotation(r)
+        rotation_tracker = ParamTracker(self, rotation_action)
+        trackers += [rotation_tracker]
+        def piezo_action(val):
+            nudge = float(val) * (MAX_PIEZO / 127.0)
+            self.iris.piezo.set_code(int(nudge))
+            poi = self.iris.current_pos_as_poi()
+            self.iris.jubilee_state.put(poi, block=False)
+        piezo_tracker = ParamTracker(self, piezo_action)
+        trackers += [piezo_tracker]
 
         profiling = False
         while True:
@@ -247,178 +570,18 @@ class Iris():
                     z_checked = 10.0
                 else:
                     z_checked = self.jubilee.z
-                focus_df.loc[len(focus_df)] = [t, f, focus_state, self.piezo.code, z_checked, "unchecked"]
-                if len(focus_df) > FOCUS_MAX_HISTORY:
-                    focus_df.drop(index=0, inplace=True)
+                self.focus_df.loc[len(self.focus_df)] = [t, f, self.focus_state, self.piezo.code, z_checked, "unchecked"]
+                if len(self.focus_df) > FOCUS_MAX_HISTORY:
+                    self.focus_df.drop(index=0, inplace=True)
 
             if self.fine_focus_event.is_set():
-                if not self.jubilee.is_on():
-                    logging.warning("Machine is not on, please turn on motors before attempting to focus!")
-                    self.fine_focus_event.clear()
-                    continue
-
-                # do the fine focus algorithm
-                if focus_state == "IDLE":
-                    logging.info("Got fine focus request")
-                    focus_state = "FIND_SLOPE"
-                    focus_steps = 0
-                    curve_df = pd.DataFrame({
-                        "piezo" : [],
-                        "z" : [],
-                        "focus_mean" : [],
-                        "focus_var" : [],
-                        "total z" : []
-                    })
-                    step_start = datetime.datetime.now()
-                    focus_starting_z = self.jubilee.z
-                    focus_starting_piezo = self.piezo.code
-                    absolute_starting_z_mm = total_z_mm(self.jubilee.z, self.piezo.code)
-                elif focus_state == "FIND_SLOPE":
-                    # safety check
-                    if total_z_mm(self.jubilee.z, self.piezo.code) > absolute_starting_z_mm + FOCUS_MAX_EXCURSION_MM or \
-                    total_z_mm(self.jubilee.z, self.piezo.code) < absolute_starting_z_mm - FOCUS_MAX_EXCURSION_MM:
-                        logging.error("Focus run aborted, Z-excursion limit reached!")
-                        focus_state = "EXIT"
-                    if (datetime.datetime.now() - step_start).total_seconds() > FOCUS_SAMPLE_DURATION_S:
-                        logging.info(f"focus step {focus_steps}")
-
-                        step_data = focus_df[focus_df['time'] >= (step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S))]
-                        if is_focus_good(step_data):
-                            # store data
-                            focus_retries = 0
-                            # have to re-index to not be working on a copy of the data
-                            focus_df.loc[focus_df['time'] >= (step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'good'
-                            logging.info(f"Step {self.piezo.code} var: {step_data['focus'].std()}, mean: {step_data['focus'].mean()}, len: {len(step_data['focus'])}")
-                            curve_df.loc[len(curve_df)] = [
-                                self.piezo.code,
-                                self.jubilee.z,
-                                step_data['focus'].mean(),
-                                step_data['focus'].std(),
-                                self.jubilee.z - (self.piezo.code * PIEZO_UM_PER_LSB) / 1000.0
-                            ]
-                            # nudge by 5um
-                            last_code = self.piezo.code
-                            nudge = FOCUS_STEP_UM / PIEZO_UM_PER_LSB
-                            next_code = int(nudge * step_direction + last_code) # positive step direction => negative z-height
-
-                            # step if possible; if not adjust Z-axis. this might be dubious due to z-axis inaccuracy
-                            # (may be better to just determine the overall range prior to focus sweep and try to center things up)
-                            if self.piezo.is_code_valid(next_code):
-                                self.piezo.set_code(next_code)
-                            else:
-                                if next_code > PIEZO_MAX_CODE / 2: # going too high
-                                    # z-axis has mapping of lower values are closer to objective, so subtract a min step
-                                    self.jubilee.step_axis('z', -MIN_JUBILEE_STEP_MM)
-                                    # recalculate the next code
-                                    next_code = last_code - (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
-                                    self.piezo.set_code(next_code)
-                                else: # going too low
-                                    self.jubilee.step_axis('z', MIN_JUBILEE_STEP_MM)
-                                    next_code = last_code + (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
-                                    self.piezo.set_code(next_code)
-
-                            # report to UI
-                            poi = Poi(self.jubilee.x, self.jubilee.y, self.jubilee.z, self.piezo.code)
-                            self.jubilee_state.put(poi, block=False)
-                            # prep next step
-                            step_start = datetime.datetime.now()
-                            focus_steps += 1
-                            if focus_steps > FOCUS_SLOPE_SEARCH_STEPS:
-                                focus_state = "ANALYZE_SLOPE"
-                        else:
-                            focus_df.loc[focus_df['time'] >= (step_start + datetime.timedelta(seconds=FOCUS_PIEZO_SETTLING_S)), 'quality'] = 'bad'
-                            step_start = datetime.datetime.now()
-                            focus_retries += 1
-                            if focus_retries > FOCUS_MAX_RETRIES:
-                                logging.error("Data quality too low for autofocus. Aborting run. Check for excessive environment vibration or camera noise.")
-                                focus_state = "EXIT"
-                elif focus_state == "ANALYZE_SLOPE":
-                    sorted_curve = curve_df.sort_values(by="total z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
-                    max_row = sorted_curve.reset_index(drop=True)['focus_mean'].idxmax()
-                    if max_row >= len(curve_df) - FOCUS_STEPS_MARGIN:
-                        # best focus is toward highest total Z
-                        #  -> lower the piezo code to increase total Z more
-                        if step_direction != -1:
-                            self.piezo.set_code(focus_starting_piezo)
-                            self.jubilee.set_axis('z', focus_starting_z)
-                            step_direction = -1
-                        else:
-                            focus_starting_piezo = self.piezo.code
-                            focus_starting_z = self.jubilee.z
-                        focus_steps = 0
-                        step_start = datetime.datetime.now()
-                        focus_state = "FIND_SLOPE"
-                    elif max_row < FOCUS_STEPS_MARGIN:
-                        # best focus is toward lowest total Z
-                        #  -> raise the piezo code to reduce totalZ more
-                        if step_direction != 1:
-                            self.piezo.set_code(focus_starting_piezo)
-                            self.jubilee.set_axis('z', focus_starting_z)
-                            step_direction = 1
-                        else:
-                            focus_starting_piezo = self.piezo.code
-                            focus_starting_z = self.jubilee.z
-                        focus_steps = 0
-                        step_start = datetime.datetime.now()
-                        focus_state = "FIND_SLOPE"
-                    else:
-                        # fit to 2nd order and find maxima
-                        coefficients = np.polyfit(curve_df['total z'], curve_df['focus_mean'], deg=2)
-                        logging.info(curve_df['total z'])
-                        logging.info(curve_df['focus_mean'])
-                        logging.info(f"coefficients: {coefficients}")
-                        z_maxima = -coefficients[1] / (2 * coefficients[0])
-                        if z_maxima < curve_df['total z'].min() - AUTOFOCUS_SAFETY_MARGIN_MM \
-                        or z_maxima > curve_df['total z'].max() + AUTOFOCUS_SAFETY_MARGIN_MM:
-                            logging.error(f"Computed focus is bogus: {z_maxima:0.3f}, [{curve_df['total z'].min():0.3f}, {curve_df['total z'].max():0.3f}]")
-                        else:
-                            # servo machine to maxima
-                            logging.info(f"Focus point at {z_maxima:0.3f}mm")
-                            (new_z, new_piezo) = partition_z(z_maxima, self.jubilee.z)
-                            self.jubilee.set_axis('z', new_z)
-                            self.piezo.set_code(new_piezo)
-
-                        # check focus score
-                        focus_state = "EXIT"
-
-                elif focus_state == "EXIT":
-                    # Call this when we're done with fine focus algo...
-                    self.fine_focus_event.clear()
-                    focus_state = "IDLE"
-                    focus_df.to_csv("focus.csv")
-                    curve_df.to_csv("curve.csv")
-                else:
-                    logging.warning("Unrecognized focus state: f{focus_state}")
+                self.fine_focus()
 
             # Hardware control loop
             msg = self.midi.midi.poll()
             if msg is None:
-                # Only update the motor value after the controller is stable for one cycle
-                if local_angle_changed:
-                    if new_local_angle_control_value == last_local_angle_control_value:
-                        self.light.set_angle_from_control(new_local_angle_control_value, 'local')
-                        local_angle_changed = False
-                    last_local_angle_control_value = new_local_angle_control_value
-                if remote_angle_changed:
-                    if new_remote_angle_control_value == last_remote_angle_control_value:
-                        self.light.set_angle_from_control(new_remote_angle_control_value, 'remote')
-                        remote_angle_changed = False
-                    last_remote_angle_control_value = new_remote_angle_control_value
-                if rotation_changed:
-                    if new_rotation_value == last_rotation_value:
-                        r = (float(new_rotation_value) / 127.0) * \
-                                (CONTROL_MAX_ROTATION_ANGLE - CONTROL_MIN_ROTATION_ANGLE) + CONTROL_MIN_ROTATION_ANGLE
-                        self.jubilee.set_rotation(r)
-                        rotation_changed = False
-                    last_rotation_value = new_rotation_value
-                if piezo_changed:
-                    if new_piezo_value == last_piezo_value:
-                        nudge = float(new_piezo_value) * (MAX_PIEZO / 127.0)
-                        self.piezo.set_code(int(nudge))
-                        piezo_changed = False
-                        poi = Poi(self.jubilee.x, self.jubilee.y, self.jubilee.z, self.piezo.code)
-                        self.jubilee_state.put(poi, block=False)
-                    last_piezo_value = new_piezo_value
+                for tracker in trackers:
+                    tracker.poll()
 
                 if profiling:
                     logging.info(f"poll {datetime.datetime.now() - start}")
@@ -445,20 +608,17 @@ class Iris():
                                 break
                         assert(control_value is not None)
                         if name == "angle-local":
-                            local_angle_changed = True
-                            new_local_angle_control_value = float(control_value)
+                            local_angle_tracker.update(float(control_value))
                         elif name == "brightness-local":
                             bright = float(control_value) * (MAX_LIGHT / 127.0)
                             self.light.set_intensity_local(int(bright))
                         elif name == "angle-remote":
-                            remote_angle_changed = True
-                            new_remote_angle_control_value = float(control_value)
+                            remote_angle_tracker.update(float(control_value))
                         elif name == "brightness-remote":
                             bright = float(control_value) * (MAX_LIGHT / 127.0)
                             self.light.set_intensity_remote(int(bright))
                         elif name == "nudge-piezo":
-                            piezo_changed = True
-                            new_piezo_value = float(control_value)
+                            piezo_tracker.update(float(control_value))
                         elif name == "gamma":
                             last_gamma = (float(control_value) / 127.0) * MAX_GAMMA
                             if gamma_enabled:
@@ -466,8 +626,7 @@ class Iris():
                             else:
                                 self.gamma.gamma = 1.0
                         elif name == "rotation":
-                            rotation_changed = True
-                            new_rotation_value = float(control_value)
+                            rotation_tracker.update(float(control_value))
                         else:
                             curvals[name] = control_value
                             if refvals[name] is None:
@@ -519,7 +678,7 @@ class Iris():
                                 if len(maybe_poi) == 1:
                                     self.midi.set_led_state(note_id, True)
                                     self.jubilee.set_poi(int(maybe_poi[0]), self.piezo.code)
-                                    logging.info(f"Set POI {maybe_poi[0]}. X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {total_z_mm(self.jubilee.z, self.piezo.code):0.3f}")
+                                    logging.info(f"Set POI {maybe_poi[0]}. X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {self.total_z_mm():0.3f}")
                             elif 'recall POI' in name:
                                 maybe_poi = re.findall(r'^recall POI (\d)', name)
                                 if len(maybe_poi) == 1:
@@ -527,8 +686,8 @@ class Iris():
                                     piezo_residual = self.jubilee.recall_poi(poi_index)
                                     if piezo_residual is not None:
                                         self.piezo.set_code(piezo_residual)
-                                        logging.info(f"Recall POI {poi_index}. X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {total_z_mm(self.jubilee.z, self.piezo.code):0.3f}")
-                                        poi = Poi(self.jubilee.x, self.jubilee.y, self.jubilee.z, self.piezo.code)
+                                        logging.info(f"Recall POI {poi_index}. X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {self.total_z_mm():0.3f}")
+                                        poi = self.current_pos_as_poi()
                                         self.jubilee_state.put(poi, block=False)
 
                             elif name == 'quit button':
@@ -548,158 +707,16 @@ class Iris():
                                     self.gamma.gamma = last_gamma
                             elif name == 'report position button':
                                 try:
-                                    logging.info(f"X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {total_z_mm(self.jubilee.z, self.piezo.code):0.3f}")
+                                    logging.info(f"X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {self.total_z_mm():0.3f}")
                                 except:
                                     logging.info("Machine is IDLE or controls not synchronized")
                             elif name == 'automate button':
                                 if self.args.automation == 'step':
-                                    # check that the POIs have been set
-                                    if self.jubilee.poi[0] is None or self.jubilee.poi[1] is None:
-                                        logging.warning("POIs have not been set, can't automate!")
-                                        continue
-                                    if self.jubilee.poi[2] is None:
-                                        # simplify edge cases by just duplicating to create our third POI
-                                        self.jubilee.poi[2] = self.jubilee.poi[1]
-                                    # plan the path of steps
-                                    min_x = min([i.x for i in self.jubilee.poi])
-                                    max_x = max([i.x for i in self.jubilee.poi])
-                                    min_y = min([i.y for i in self.jubilee.poi])
-                                    max_y = max([i.y for i in self.jubilee.poi])
-
-                                    x_path = np.arange(min_x, max_x, self.stepsize)
-                                    if len(x_path) == 0: # this happens if min == max
-                                        x_path = [min_x]
-                                    # make sure we include the end interval in the photo region
-                                    if max(x_path) < max_x:
-                                        x_path = np.append(x_path, max(x_path) + self.stepsize)
-                                    # These fail due to floating point rounding errors :P
-                                    # assert(max(x_path) >= max_x)
-                                    y_path = np.arange(min_y, max_y, self.stepsize)
-                                    if len(y_path) == 0: # handle min == max
-                                        y_path = [min_y]
-                                    # make sure we include the end interval in the photo region
-                                    if max(y_path) < max_y:
-                                        y_path = np.append(y_path, max(y_path) + self.stepsize)
-                                    # assert(max(y_path) >= max_y)
-
-                                    # derive Z-plane equation
-                                    p = []
-                                    for i in range(3):
-                                        p += [np.array((self.jubilee.poi[i].x, self.jubilee.poi[i].y, total_z_mm(self.jubilee.poi[i].z, self.jubilee.poi[i].piezo)))]
-
-                                    if np.array_equal(p[1], p[2]):
-                                        p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
-                                        p[2][1] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
-
-                                    v1 = p[1] - p[0]
-                                    v2 = p[2] - p[0]
-                                    normal_vector = np.cross(v1, v2)
-                                    a, b, c = normal_vector
-                                    d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
-
-                                    logging.info(f"stepping x {x_path}")
-                                    logging.info(f"stepping y {y_path}")
-
-                                    for x in x_path:
-                                        for y in y_path:
-                                            # derive composite-z
-                                            zp = -(a * x + b * y + d) / c
-
-                                            # Compute Z partition
-                                            (z, p_lsb) = partition_z(zp, self.jubilee.z)
-
-                                            # check values
-                                            if p_lsb > PIEZO_MAX_CODE:
-                                                logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
-                                                continue
-                                            if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
-                                                logging.warning(f"Z value seems hazardous, aborting step: {z}")
-                                                continue
-                                            if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
-                                                logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
-                                                continue
-
-                                            logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
-                                            self.jubilee.goto((x, y, z))
-                                            self.piezo.set_code(p_lsb)
-
-                                            # setup the image_name object
-                                            self.image_name.x = self.jubilee.x
-                                            self.image_name.y = self.jubilee.y
-                                            self.image_name.z = self.jubilee.z
-                                            self.image_name.p = self.piezo.code
-                                            self.image_name.i = self.light.intensity_local
-                                            self.image_name.t = self.light.angle_local
-                                            self.image_name.j = self.light.intensity_remote
-                                            self.image_name.u = self.light.angle_remote
-                                            self.image_name.a = self.jubilee.r
-                                            self.image_name.cur_rep = None
-                                            self.image_name.rep = self.args.reps
-                                            # wait for system to settle
-                                            logging.info(f"settling for {self.args.settling}s")
-                                            time.sleep(self.args.settling)
-                                            # this should trigger the picture
-                                            logging.info(f"triggering photos")
-                                            self.auto_snap_event.set()
-                                            self.auto_snap_done.wait()
-                                            logging.info(f"got photo done event")
-                                            # reset the flags
-                                            self.auto_snap_event.clear()
-                                            self.auto_snap_done.clear()
-
+                                    self.automate_flat_image()
                                 elif self.args.automation == 'psi': # rotate the light around the vertical axis
-                                    psi_base = self.jubilee.get_rotation()
-                                    for delta_psi in range(0, 95, 1):
-                                        self.jubilee.set_rotation(psi_base + delta_psi)
-                                        self.image_name.x = self.jubilee.x
-                                        self.image_name.y = self.jubilee.y
-                                        self.image_name.z = self.jubilee.z
-                                        self.image_name.p = self.piezo.code
-                                        self.image_name.i = self.light.intensity_local
-                                        self.image_name.t = self.light.angle_local
-                                        self.image_name.j = self.light.intensity_remote
-                                        self.image_name.u = self.light.angle_remote
-                                        self.image_name.a = self.jubilee.r
-                                        self.image_name.cur_rep = None
-                                        self.image_name.rep = self.args.reps
-                                        # wait for system to settle
-                                        logging.info(f"settling for {self.args.settling}s")
-                                        time.sleep(self.args.settling)
-                                        # this should trigger the picture
-                                        logging.info(f"triggering photos")
-                                        self.auto_snap_event.set()
-                                        self.auto_snap_done.wait()
-                                        logging.info(f"got photo done event")
-                                        # reset the flags
-                                        self.auto_snap_event.clear()
-                                        self.auto_snap_done.clear()
-
+                                    self.automate_psi_image()
                                 elif self.args.automation == 'theta': # rotate the light around the vertical axis
-                                    for theta in range(0, 127, 2):
-                                        self.light.set_angle_from_control(theta, 'remote')
-                                        self.image_name.x = self.jubilee.x
-                                        self.image_name.y = self.jubilee.y
-                                        self.image_name.z = self.jubilee.z
-                                        self.image_name.p = self.piezo.code
-                                        self.image_name.i = self.light.intensity_local
-                                        self.image_name.t = self.light.angle_local
-                                        self.image_name.j = self.light.intensity_remote
-                                        self.image_name.u = self.light.angle_remote
-                                        self.image_name.a = self.jubilee.r
-                                        self.image_name.cur_rep = None
-                                        self.image_name.rep = self.args.reps
-                                        # wait for system to settle
-                                        logging.info(f"settling for {self.args.settling}s")
-                                        time.sleep(self.args.settling)
-                                        # this should trigger the picture
-                                        logging.info(f"triggering photos")
-                                        self.auto_snap_event.set()
-                                        self.auto_snap_done.wait()
-                                        logging.info(f"got photo done event")
-                                        # reset the flags
-                                        self.auto_snap_event.clear()
-                                        self.auto_snap_done.clear()
-
+                                    self.automate_theta_image()
                                 else:
                                     logging.error("Unrecognized automation type, doing nothing.")
 
@@ -745,7 +762,7 @@ class Iris():
                             logging.warning("Motor command timeout!")
                             self.midi.clear_events()
                 # update the UI thread
-                poi = Poi(self.jubilee.x, self.jubilee.y, self.jubilee.z, self.piezo.code)
+                poi = self.current_pos_as_poi()
                 self.jubilee_state.put(poi, block=False)
 
 def set_controls(midi_in):
@@ -860,16 +877,6 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.mag == 5:
-        stepsize = 0.5
-    elif args.mag == 10:
-        stepsize = 0.3
-    elif args.mag == 20:
-        stepsize = 0.1
-    else:
-        logging.error("Magnification must be one of [5, 10, 20]")
-        exit(0)
-
     gamma = Gamma()
     image_name = ImageNamer()
     image_name.name = args.name
@@ -973,13 +980,16 @@ def main():
         with midi as m:
             with light as l:
                 with piezo as p:
-                    q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
-                    q.start()
-                    l = Thread(target=loop, args=[
-                        args, stepsize, j, m, l, p, gamma, image_name,
+                    # build the main iris control object
+                    iris = Iris(
+                        args, j, m, l, p, gamma, image_name,
                         auto_snap_done, auto_snap_event, schema,
                         focus_score, jubilee_state, fine_focus_event
-                    ])
+                    )
+
+                    q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
+                    q.start()
+                    l = Thread(target=iris.loop, args=[])
                     l.start()
                     # when the quitter exits, everything has been brought down in an orderly fashion
                     q.join()
