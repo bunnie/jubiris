@@ -478,7 +478,8 @@ class Iris():
 
         elif self.focus_state == "ANALYZE_SLOPE":
             sorted_curve = self.curve_df.sort_values(by="total_z") # now sorted from lowest to highest total Z (highest to lowest piezo code)
-            max_row = sorted_curve.reset_index(drop=True)['focus_metric'].idxmax()
+            sorted_curve = sorted_curve.reset_index(drop=True)
+            max_row = sorted_curve['focus_metric'].idxmax()
             logging.info(f" --- max_row: {max_row}, data points: {len(self.curve_df)} ---")
             logging.info(f"{sorted_curve}")
             if max_row >= len(self.curve_df) - FOCUS_STEPS_MARGIN:
@@ -504,8 +505,12 @@ class Iris():
                 self.step_start = datetime.datetime.now()
                 self.focus_state = "FIND_SLOPE"
             else:
-                # fit to 2nd order and find maxima
-                coefficients = np.polyfit(self.curve_df['total_z'], self.curve_df['focus_metric'], deg=2)
+                # fit to 2nd order and find maxima; only use the points directly around the maxima
+                coefficients = np.polyfit(
+                    sorted_curve.loc[max_row - FOCUS_STEPS_MARGIN:max_row + FOCUS_STEPS_MARGIN]['total_z'],
+                    sorted_curve.loc[max_row - FOCUS_STEPS_MARGIN:max_row + FOCUS_STEPS_MARGIN]['focus_metric'],
+                    deg=2
+                )
                 logging.debug(self.curve_df['total_z'])
                 logging.debug(self.curve_df['focus_metric'])
                 logging.info(f"coefficients: {coefficients}")
