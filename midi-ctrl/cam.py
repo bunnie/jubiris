@@ -218,7 +218,7 @@ class MainWindow(QMainWindow):
         self.normalize_enable = state
     def onFineFocus(self):
         self.fine_focus_event.set()
-    
+
     def draw_graph(self, data, w=500, h=500):
         MARGIN = 0.1
         MIN_Y_RANGE = 500
@@ -273,7 +273,7 @@ class MainWindow(QMainWindow):
             thickness=2,
         )
         return canvas
-   
+
     def onTimer(self):
         if self.hcam:
             nFrame, nTime, nTotalFrame = self.hcam.get_FrameRate()
@@ -344,7 +344,7 @@ class MainWindow(QMainWindow):
             self.handleExpoEvent()
 
             self.timer.start(1000)
-        
+
     def openCamera(self):
         self.hcam = toupcam.Toupcam.Open(self.cur.id)
         if self.hcam:
@@ -366,7 +366,7 @@ class MainWindow(QMainWindow):
         if self.hcam:
             self.closeCamera()
         self.close()
-    
+
     def setupCamera(self):
         arr = toupcam.Toupcam.EnumV2()
         if 0 == len(arr):
