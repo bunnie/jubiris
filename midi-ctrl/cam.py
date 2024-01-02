@@ -651,6 +651,9 @@ def snapper(w, auto_snap_event, auto_snap_done):
             w.single_snap_done.clear()
             w.image_name.cur_rep = None
         auto_snap_done.set()
+    # close the main window upon reaching quit
+    w.closeCamera()
+    w.close()
 
 
 def cam(cam_quit, gamma, image_name,

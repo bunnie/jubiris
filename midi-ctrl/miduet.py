@@ -87,6 +87,10 @@ class Gamma:
 # safe to change by the controller until an auto_snap_event is
 # triggered; after which, it must wait until auto_snap_done triggers
 # to update state.
+#
+# Contrary to its name, its function is not just to name images,
+# but it has also absorbed functions to channel data from the control
+# thread to the UI thread, such as Quit state and focus area.
 class ImageNamer:
     def __init__(self):
         self.name = None # base name
