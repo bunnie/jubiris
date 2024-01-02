@@ -843,6 +843,12 @@ class Iris():
                                     logging.error("Unrecognized automation type, doing nothing.")
 
                                 logging.info("Automation done!")
+                                if self.args.auto_quit:
+                                    self.jubilee.motors_off()
+                                    self.all_leds_off()
+                                    logging.info("Quitting controller...")
+                                    cam_quit.set()
+                                    return
 
                         elif 'note_off' in str(msg):
                             # the button was lifted
@@ -999,6 +1005,9 @@ def main():
     )
     parser.add_argument(
         "--dynamic-focus", required=False, action="store_true", help="When set, ignore settling time and compute focus/quality metric on every image"
+    )
+    parser.add_argument(
+        "--auto-quit", action="store_true", help="Automatically quit after automation runs"
     )
     args = parser.parse_args()
 
