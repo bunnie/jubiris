@@ -46,7 +46,9 @@ from light import Light, MAX_LIGHT
 from piezo import Piezo, PIEZO_MAX_CODE, PIEZO_MAX_VOLT, PIEZO_UM_PER_LSB, PIEZO_UM_PER_VOLT, MAX_PIEZO
 from jubilee import Jubilee, Poi, MAX_POI, MIN_ROTATION_ANGLE, MAX_ROTATION_ANGLE, \
     CONTROL_MIN_ROTATION_ANGLE, CONTROL_MAX_ROTATION_ANGLE, MIN_JUBILEE_STEP_MM
+from cam import FOCUS_AREA_PX
 from midi import Midi
+from PyQt5.QtCore import QRect
 
 import matplotlib.pyplot as plt
 
@@ -101,10 +103,39 @@ class ImageNamer:
         self.cur_rep = None
         self.quit = False # flag to indicate if we're exiting
         self.dummy = False
+        self.focus_area = (0, 0) # (x, y) tuple encoding focus area snapping
+        self.w = 3840 # expected image total width
+        self.h = 2160 # expected image total height
     def is_init(self):
         return self.name is not None and self.x is not None and self.y is not None \
         and self.z is not None and self.p is not None \
         and self.i is not None and self.t is not None
+    # Focus area is an (x, y) tuple where each specifies a sign of an offset for
+    # the focus area as follows:
+    FOCUS_RIGHT = 1
+    FOCUS_CENTER = 0
+    FOCUS_LEFT = -1
+    FOCUS_TOP = -1
+    FOCUS_BOTTOM = 1
+    # For example, (0, 0) means center; (1, 0) means "align to right center",
+    # (1, -1) means "align to top right". Only the sign of the argument matters,
+    # the magnitude is ignored.
+    def set_focus_area(self, fa: (int, int)):
+        self.focus_area = fa
+    def get_focus_rect(self):
+        if self.focus_area[0] == ImageNamer.FOCUS_CENTER: # center
+            left = self.w // 2 - FOCUS_AREA_PX // 2
+        elif self.focus_area[0] < 0: # align left
+            left = 0
+        else: # align right
+            left = self.w - FOCUS_AREA_PX
+        if self.focus_area[1] == ImageNamer.FOCUS_CENTER:
+            top = self.h // 2 - FOCUS_AREA_PX // 2
+        elif self.focus_area[1] < 0: # top
+            top = 0
+        else: # bottom
+            top = self.h - FOCUS_AREA_PX
+        return QRect(left, top, FOCUS_AREA_PX, FOCUS_AREA_PX)
     def get_name(self):
         if self.cur_rep is not None:
             r = str(self.cur_rep)
@@ -382,9 +413,31 @@ class Iris():
         logging.info(f"stepping x {x_path}")
         logging.info(f"stepping y {y_path}")
 
-        for x in x_path:
-            for y in y_path:
+        for i, x in enumerate(x_path):
+            # track y in a serpentine to reduce machine movement (otherwise y-jogs from max to min every strip)
+            if i % 2 == 0:
+                y_serpentine = y_path
+            else:
+                y_serpentine = y_path[::-1]
+            for y in y_serpentine:
+                # pick the focus area based on the trajectory: focus towards the center of the chip
+                # when on periphery, because the region off the margin of the chip is not suitable for focus
+                if x == x_path.min():
+                    focus_area_x = ImageNamer.FOCUS_RIGHT
+                elif x == x_path.max():
+                    focus_area_x = ImageNamer.FOCUS_LEFT
+                else:
+                    focus_area_x = ImageNamer.FOCUS_CENTER
+                if y == y_path.min():
+                    focus_area_y = ImageNamer.FOCUS_BOTTOM
+                elif y == y_path.max():
+                    focus_area_y = ImageNamer.FOCUS_TOP
+                else:
+                    focus_area_y = ImageNamer.FOCUS_CENTER
+                self.image_name.set_focus_area((focus_area_x, focus_area_y))
+
                 if not self.args.dynamic_focus:
+                    # Dead-reckon to a focus point based on solving the plane equation of the points of interest.
                     # derive composite-z
                     zp = -(a * x + b * y + d) / c
 
@@ -406,6 +459,9 @@ class Iris():
                     self.jubilee.goto((x, y, z))
                     self.piezo.set_code(p_lsb)
                 else:
+                    # Re-compute autofocus at each step. Don't use the z-plane as a guideline because
+                    # We want each step to incrementally move from the previous step's focus determination
+                    # under the theory that the focus plane shifts only gradually at each step.
                     logging.info(f"Step to {x:0.2f}, {y:0.2f}")
                     self.jubilee.goto((x, y, self.jubilee.z))
                     self.wait_for_machine_settling()

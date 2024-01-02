@@ -459,8 +459,14 @@ class MainWindow(QMainWindow):
             # extract a full-res preview image of the focus area
             w = qr.width()
             h = qr.height()
-            centerimage = image.copy(w//2 - FOCUS_AREA_PX//2, h//2 - FOCUS_AREA_PX//2, FOCUS_AREA_PX, FOCUS_AREA_PX)
-            centerimage_rect = centerimage.rect()
+            if self.image_name is None:
+                centerimage = image.copy(w//2 - FOCUS_AREA_PX//2, h//2 - FOCUS_AREA_PX//2, FOCUS_AREA_PX, FOCUS_AREA_PX)
+                centerimage_rect = centerimage.rect()
+            else:
+                self.image_name.w = w
+                self.image_name.h = h
+                centerimage_rect = self.image_name.get_focus_rect()
+                centerimage = image.copy(centerimage_rect)
 
             # add focus rectangle mark
             # painter = QPainter(centerimage)
@@ -624,15 +630,14 @@ class MainWindow(QMainWindow):
                         self.single_snap_done.set()
 
 
-def snapper(w, image_name, auto_snap_event, auto_snap_done):
+def snapper(w, auto_snap_event, auto_snap_done):
     while True:
         auto_snap_event.wait()
         auto_snap_event.clear()
-        if image_name.quit:
+        if w.image_name.quit:
             break
-        w.image_name = image_name
-        if image_name.rep is not None:
-            rep = int(image_name.rep) + 1 # +1 for the dummy exposure
+        if w.image_name.rep is not None:
+            rep = int(w.image_name.rep) + 1 # +1 for the dummy exposure
         else:
             rep = 2
         for i in range(rep):
@@ -645,7 +650,6 @@ def snapper(w, image_name, auto_snap_event, auto_snap_done):
             w.single_snap_done.wait()
             w.single_snap_done.clear()
             w.image_name.cur_rep = None
-        w.image_name = None
         auto_snap_done.set()
 
 
@@ -654,6 +658,7 @@ def cam(cam_quit, gamma, image_name,
         focus_queue, mag, jubilee_state, fine_focus_event):
     app = QApplication(sys.argv)
     w = MainWindow(mag)
+    w.image_name = image_name
     w.setGeometry(50, 500, 2200, 3000)
     w.show()
     w.gamma = gamma
@@ -665,7 +670,7 @@ def cam(cam_quit, gamma, image_name,
     w.fine_focus_event = fine_focus_event
 
     # Run a thread to forward/manage snapshotting events
-    b = Thread(target=snapper, args=[w, image_name, auto_snap_event, auto_snap_done])
+    b = Thread(target=snapper, args=[w, auto_snap_event, auto_snap_done])
     b.start()
 
     # run the application. execution blocks at this line, until app quits
