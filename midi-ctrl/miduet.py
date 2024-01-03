@@ -495,6 +495,10 @@ class Iris():
                 self.auto_snap_event.clear()
                 self.auto_snap_done.clear()
 
+        # reset the head to POI 1 (the origin of the scan) - makes it easier to fix up & rescan later
+        # note that nothing prevents you from swapping the POI, it just makes your life harder. "don't do that, stupid".
+        self.jubilee.recall_poi(1)
+
     def automate_psi_image(self):
         psi_base = self.jubilee.get_rotation()
         for delta_psi in range(0, 95, 1):
@@ -858,6 +862,9 @@ class Iris():
                                     continue
                                 maybe_poi = re.findall(r'^set POI (\d)', name)
                                 if len(maybe_poi) == 1:
+                                    if int(maybe_poi[0]) == 1: # when setting POI 1, reset machine coords to 0
+                                        logging.info("POI 1 set - note that this should be the top left of the scan area by convention!")
+                                        self.jubilee.motors_on_set_zero()
                                     self.midi.set_led_state(note_id, True)
                                     self.jubilee.set_poi(int(maybe_poi[0]), self.piezo.code)
                                     logging.info(f"Set POI {maybe_poi[0]}. X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {self.total_z_mm():0.3f}")
