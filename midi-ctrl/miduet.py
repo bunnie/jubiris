@@ -483,6 +483,8 @@ class Iris():
                             self.fine_focus()
                         self.focus_automation = False
                         # if the focus step took us out of a narrow range, guess that we really messed up and try again.
+                        # note: the origin of this is that sometimes the focus will latch onto a top mark or the texture
+                        # of the silicon backside if there's a lack of interesting features to look at.
                         if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0:
                             self.smart_set_z_mm(before_z)
                             focus_success = False
@@ -583,7 +585,7 @@ class Iris():
             self.step_start = datetime.datetime.now()
             self.focus_steps = 0
             self.focus_retries = 0
-            self.step_direction = 1 # 1 or -1 for increase or decreasing z value; increased Z is farther from objective
+            self.step_direction = -1 # 1 or -1 for increase or decreasing z value; increased Z is farther from objective
 
             self.absolute_starting_z_mm = self.total_z_mm()
             self.focus_starting_z_mm = self.absolute_starting_z_mm
