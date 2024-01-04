@@ -75,6 +75,7 @@ FOCUS_STEPS_MARGIN = 2 # minimum number of steps required to define one side of 
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
 FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machine has settled
 FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
+FOCUS_INCREMENTAL_RANGE_UM = 30
 
 cam_quit = Event()
 
@@ -471,12 +472,37 @@ class Iris():
                     self.wait_for_machine_settling()
 
                     # run focus
-                    self.focus_automation = True
-                    self.fine_focus_event.set()
-                    while self.fine_focus_event.is_set():
-                        self.fetch_focus_events()
-                        self.fine_focus()
-                    self.focus_automation = False
+                    before_z = self.total_z_mm()
+                    focus_success = False
+                    focus_iters = 0
+                    while not focus_success:
+                        self.focus_automation = True
+                        self.fine_focus_event.set()
+                        while self.fine_focus_event.is_set():
+                            self.fetch_focus_events()
+                            self.fine_focus()
+                        self.focus_automation = False
+                        # if the focus step took us out of a narrow range, guess that we really messed up and try again.
+                        if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0:
+                            self.smart_set_z_mm(before_z)
+                            focus_success = False
+                            focus_iters += 1
+                            # pick a different spot to focus every time
+                            if focus_iters == 1:
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_TOP))
+                            elif focus_iters == 2:
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_TOP))
+                            elif focus_iters == 3:
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_CENTER))
+                            elif focus_iters == 4:
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_RIGHT, ImageNamer.FOCUS_CENTER))
+                            elif focus_iters == 5:
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_BOTTOM))
+                            if focus_iters > 5:
+                                logging.warning("Focus failed to converge, keeping previous Z-height.")
+                                break
+                        else:
+                            focus_success = True
 
                     self.wait_for_machine_settling()
 
