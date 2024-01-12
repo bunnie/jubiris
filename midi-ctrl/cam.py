@@ -25,10 +25,10 @@ from datetime import datetime
 
 from piezo import PIEZO_UM_PER_LSB
 
-DEFAULT_LAPLACIAN_5X = 7 # this gets multiplied by 2 and 1 added to ensure the result is odd
+DEFAULT_LAPLACIAN_5X = 7
 DEFAULT_FILTER_5X = 11
-DEFAULT_LAPLACIAN_10X = 5
-DEFAULT_FILTER_10X = 7
+DEFAULT_LAPLACIAN_10X = 7 # 9  note: fiddle with focus and see if we can manually use the graph to focus. Params depends on the chip node?
+DEFAULT_FILTER_10X = 9    # 17
 DEFAULT_LAPLACIAN_20X = 15
 DEFAULT_FILTER_20X = 21
 DEFAULT_LAPLACIAN = None
@@ -565,7 +565,10 @@ class MainWindow(QMainWindow):
                     if poi.y:
                         self.label_y.setText(f"{poi.y:0.2f}mm")
                     if update_z:
-                        self.label_z_total.setText(f"{(poi.z - (poi.piezo * PIEZO_UM_PER_LSB) / 1000.0):0.4f}mm")
+                        if poi.piezo and poi.z:
+                            self.label_z_total.setText(f"{(poi.z - (poi.piezo * PIEZO_UM_PER_LSB) / 1000.0):0.4f}mm")
+                        else:
+                            logging.warning(f"Tried to update total Z text but something was None: piezo {poi.piezo}, z {poi.z}")
             except queue.Empty:
                 pass
 

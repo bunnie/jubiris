@@ -7,7 +7,7 @@ MIN_ROTATION_ANGLE = -100.0
 MAX_ROTATION_ANGLE = 100.0
 CONTROL_MIN_ROTATION_ANGLE = -80.0 # somewhat not exactly degrees somehow...
 CONTROL_MAX_ROTATION_ANGLE = 80.0
-MIN_JUBILEE_STEP_MM = 0.01
+MIN_JUBILEE_STEP_MM = 0.03 # must be big enough to encompass a focus sweep!
 
 class Poi:
     def __init__(self, x, y, z, piezo):
@@ -20,6 +20,10 @@ class Jubilee:
     def __init__(self, port):
         self.port = port
         self.state = 'OFF'
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 10.0
+        self.r = 0.0
         try:
             ser = serial.Serial(port, 115200, timeout = 1.0)
             logging.debug("Duet3D serial port opened")

@@ -51,6 +51,7 @@ from midi import Midi
 from PyQt5.QtCore import QRect
 
 import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error
 
 # Device-specific mapping of serial numbers of FTDI RS232 adapters
 # Ensures that the correct port is picked even if the device node changes randomly.
@@ -63,21 +64,38 @@ SCHEMA_STORAGE = 'miduet-config.json'
 SCHEMA_VERSION = 3
 MAX_GAMMA = 2.0
 
+# Tuning method:
+# 1. Set machine to any region of interest.
+# 2. Use piezo knob to try to find best focus exclusively looking at metric graph
+# 3. Adjust laplacian & filter to get the strogest positive signal for "focusedness".
+#    Note that some settings actually create a strong signal for out of focusedness, and
+#    the precise setting will depend a bit on the fabrication process being imaged.
+# 4. Observe the steady state variance, and set the FOCUS_VARIANCE_THRESH to that.
+# 5. Go to the top left, and focus the region. Set is as the first POI.
+# 6. Hit the "mid-z" button to put the mechanical Z into the mid zone of the piezo actuator
+# 7. Store the first POI again with mid-z set.
+# 8. Go to the bottom left. Focus, and store as POI 2
+# 9. Go to the bottom right. Focus, and store as POI 3.
+# 10. Go back to POI 1, which is the start of stitch.
+# 11. Make sure we're focused.
+# 12. Start the stitching run.
+
+FOCUS_VARIANCE_THRESH = 20.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
 FOCUS_MAX_HISTORY = 2000
 FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
 FOCUS_MIN_SAMPLES = 5
 FOCUS_PIEZO_SETTLING_S = 0.2 # empirically determined settling time
-FOCUS_VARIANCE_THRESH = 1.1 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
 FOCUS_MAX_RETRIES = 15
 FOCUS_MAX_EXCURSION_MM = 0.2
-FOCUS_STEPS_MARGIN = 3 # minimum number of steps required to define one side of the focus curve
+FOCUS_STEPS_MARGIN = 2 # minimum number of steps required to define one side of the focus curve
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
 FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machine has settled
 FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
-FOCUS_INCREMENTAL_RANGE_UM = 20
+FOCUS_INCREMENTAL_RANGE_UM = 50
 FOCUS_ABSOLUTE_RANGE_UM = 90 # total deviation allowable from the projected Z-plane
-FOCUS_RSQUARE_LIMIT = 100.0 # upper limit for RSQUARE fitting
+FOCUS_RSQUARE_LIMIT = 0.015 # multiply by mean of focus metric to get max error on fit (think of as %age of metric for fit)
+FOCUS_RATIO_LIMIT = 0.99 # minimum ratio of actual vs predicted focus metric
 
 cam_quit = Event()
 
@@ -115,6 +133,7 @@ class ImageNamer:
         self.h = 2160 # expected image total height
         self.f = 0 # polynomial fit
         self.s = 0 # focus score metric
+        self.v = 0 # predicted vs actual ratio
     def is_init(self):
         return self.name is not None and self.x is not None and self.y is not None \
         and self.z is not None and self.p is not None \
@@ -150,7 +169,7 @@ class ImageNamer:
             r = str(self.cur_rep)
         else:
             r = '1'
-        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}_f{self.f:0.1f}_s{int(self.s)}'
+        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}_f{self.f:0.1f}_s{int(self.s)}_v{self.v:0.3f}'
 
 # evaluate if the collected focus data meets our quality requirements (is the machine settled)
 # returns True if the data is usable, as well as the statistics on the data
@@ -273,6 +292,8 @@ class Iris():
         self.focus_state = "IDLE"
         self.polyfit = 0
         self.final_score = 0
+        self.predicted_metric = 0
+        self.focus_ratio = 0
 
     def all_leds_off(self):
         # turn off all controller LEDs
@@ -305,6 +326,8 @@ class Iris():
 
     # Nudges the z distance, preferring to move the piezo before invoking jubilee
     # nudge is in units of microns
+    # Returns False if we did not have to adjust machine Z
+    # True if there was a change
     def smart_nudge_z_um(self, nudge_um):
         next_code = int(-nudge_um / PIEZO_UM_PER_LSB + self.piezo.code)
 
@@ -312,6 +335,7 @@ class Iris():
         # (may be better to just determine the overall range prior to focus sweep and try to center things up)
         if self.piezo.is_code_valid(next_code):
             self.piezo.set_code(next_code)
+            return False
         else:
             logging.info(f"Adjusting machine z: {next_code} is out of range @ {self.jubilee.z}mm")
             if next_code > PIEZO_MAX_CODE / 2: # going too high
@@ -326,12 +350,35 @@ class Iris():
                 next_code = self.piezo.code + (MIN_JUBILEE_STEP_MM * 1000.0) / PIEZO_UM_PER_LSB
                 self.piezo.set_code(next_code)
                 logging.info(f"Code is now {next_code} @ {self.jubilee.z}mm")
+            return True
 
     def smart_set_z_mm(self, total_z_mm):
         (jubilee_z, piezo_code) = self.partition_z_mm(total_z_mm)
         logging.info(f"smart_set_z: {total_z_mm} -> ({jubilee_z:0.2f}, {piezo_code})")
         self.jubilee.set_axis('z', jubilee_z)
         self.piezo.set_code(piezo_code)
+
+    def set_mid_z(self):
+        pois = []
+        for p in self.jubilee.poi:
+            if p is not None:
+                pois += [p]
+        if len(pois) < 1:
+            logging.info("No POI set, can't center Z")
+            return
+        total_zs = []
+        for p in pois:
+            total_zs += [p.z - (p.piezo * PIEZO_UM_PER_LSB) / 1000.0]
+        avg_z = np.mean(total_zs)
+        target_piezo = MAX_PIEZO / 2
+        machine_mid_z = avg_z + (target_piezo * PIEZO_UM_PER_LSB) / 1000.0
+        z_increment = 1/0.01
+        machine_mid_z = math.ceil(machine_mid_z * z_increment) / z_increment
+        piezo_mid_z = ((machine_mid_z - avg_z ) * 1000) / PIEZO_UM_PER_LSB
+        self.jubilee.set_axis('z', machine_mid_z)
+        self.piezo.set_code(piezo_mid_z)
+        logging.info(f"Z list: {total_zs}")
+        logging.info(f"Z avg: {avg_z}, Z jubilee: {machine_mid_z:0.02f}, Piezo code: {piezo_mid_z}")
 
     # Requires that self.settling_start has been set!
     def is_settled(self):
@@ -341,6 +388,8 @@ class Iris():
         else:
             var = settling_data['focus'].std()
             logging.debug(f"Setting metric: {var} @ {len(settling_data)} samples")
+            # final score is set here because is_settled() is the last thing called before an image is taken
+            self.final_score = settling_data['focus'].mean()
             return var < 2 * FOCUS_VARIANCE_THRESH
 
     def wait_for_machine_settling(self):
@@ -376,6 +425,7 @@ class Iris():
         self.image_name.rep = self.args.reps
         self.image_name.f = self.polyfit
         self.image_name.s = self.final_score
+        self.image_name.v = self.focus_ratio
 
     def automate_flat_image(self):
         # check that the POIs have been set
@@ -422,6 +472,8 @@ class Iris():
         normal_vector = np.cross(v1, v2)
         a, b, c = normal_vector
         d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
+
+        self.set_mid_z()
 
         logging.info(f"stepping x {x_path}")
         logging.info(f"stepping y {y_path}")
@@ -472,21 +524,16 @@ class Iris():
                     self.jubilee.goto((x, y, z))
                     self.piezo.set_code(p_lsb)
                 else:
-                    # Dead-reckon to a focus point based on solving the plane equation of the points of interest.
-                    # derive composite-z
-                    zp = -(a * x + b * y + d) / c
-                    # Compute Z partition
-                    (z, p_lsb) = self.partition_z_mm(zp)
-
-                    # Re-compute autofocus at each step, starting from the nominal dead-reckoning point as
-                    # an initial guideline. This prevents us from "drifting" off the chip plane because we
-                    # got distracted with a backside chip feature.
+                    # Re-compute autofocus at each step
                     logging.info(f"Step to {x:0.2f}, {y:0.2f}")
+                    # Check if we have drifted off the ideal plane
+                    zp = -(a * x + b * y + d) / c
                     if abs(self.total_z_mm() - zp) > FOCUS_ABSOLUTE_RANGE_UM / 1000.0:
-                        logging.info("Current focus seems out of range, set back to projected focus plane")
-                        self.jubilee.goto((x, y, z))
-                        self.piezo.set_code(p_lsb)
+                        logging.warning("Current focus seems out of range, set back to projected focus plane")
+                        # Dead-reckon to a focus point based on solving the plane equation of the points of interest.
+                        self.smart_set_z_mm(zp)
                     else:
+                        # Otherwise, preserve the previous Z-setting
                         self.jubilee.goto((x, y, self.jubilee.z))
                     self.wait_for_machine_settling()
 
@@ -503,35 +550,46 @@ class Iris():
                             self.fetch_focus_events()
                             self.fine_focus()
                         self.focus_automation = False
-                        # if the focus step took us out of a narrow range, guess that we really messed up and try again.
+
+                        # settle after each iteration, so we have a fair start to the focus algo, and we can compute focus ratio!
+                        self.wait_for_machine_settling()
+                        self.focus_ratio = self.final_score / self.predicted_metric
+
+                        # if the focus step took us out of a narrow range, or if our prediction was off,
+                        # guess that we really messed up and try again.
                         # note: the origin of this is that sometimes the focus will latch onto a top mark or the texture
                         # of the silicon backside if there's a lack of interesting features to look at.
-                        if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0:
+                        if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0 or \
+                            self.focus_ratio < FOCUS_RATIO_LIMIT:
+                            if self.focus_ratio < FOCUS_RATIO_LIMIT:
+                                logging.warning(f"Focus ratio out of range: {self.focus_ratio:0.3f} < {FOCUS_RATIO_LIMIT}")
+                            else:
+                                logging.warning(f"Focus delta out of range: {int((before_z - self.total_z_mm())*1000)} um, trying again!")
                             # reset to the actual Z/code prior, not the interpolated code from composite-Z
                             self.jubilee.set_axis('z', before_z_machine)
                             self.piezo.set_code(before_z_piezo)
                             focus_success = False
                             focus_iters += 1
-                            # pick a different spot to focus every time
-                            if focus_iters == 1:
+                            # pick a different spot to focus every time after the first basic retry
+                            if focus_iters == 2:
                                 self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_TOP))
-                            elif focus_iters == 2:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_TOP))
                             elif focus_iters == 3:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_CENTER))
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_TOP))
                             elif focus_iters == 4:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_RIGHT, ImageNamer.FOCUS_CENTER))
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_CENTER))
                             elif focus_iters == 5:
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_RIGHT, ImageNamer.FOCUS_CENTER))
+                            elif focus_iters == 6:
                                 self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_BOTTOM))
-                            if focus_iters > 5:
+                            else:
+                                self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_CENTER))
+                            if focus_iters > 7:
                                 logging.warning("Focus failed to converge, keeping previous Z-height.")
                                 break
                         else:
                             focus_success = True
 
-                        # settle after each iteration, so we have a fair start to the focus algo!
-                        self.wait_for_machine_settling()
-
+                logging.info(f"Predicted metric: {self.predicted_metric}, actual metric: {self.final_score}, ratio: {self.focus_ratio:0.3f}")
                 # setup the image_name object
                 self.set_image_name()
                 if not self.args.dynamic_focus:
@@ -592,6 +650,11 @@ class Iris():
             self.fine_focus_event.clear()
             return
 
+        self.absolute_starting_z_mm = self.total_z_mm()
+        self.focus_starting_z_machine = self.jubilee.z
+        self.focus_starting_z_piezo = self.piezo.code
+        self.focus_starting_z_mm = self.absolute_starting_z_mm
+
         # do the fine focus algorithm
         if self.focus_state == "IDLE":
             logging.info("Got fine focus request")
@@ -611,10 +674,6 @@ class Iris():
             self.focus_retries = 0
             self.step_direction = -1 # 1 or -1 for increase or decreasing z value; increased Z is farther from objective
 
-            self.absolute_starting_z_mm = self.total_z_mm()
-            self.focus_starting_z_machine = self.jubilee.z
-            self.focus_starting_z_piezo = self.piezo.code
-            self.focus_starting_z_mm = self.absolute_starting_z_mm
             expo_time_s = self.focus_df.loc[self.focus_df['time'].idxmax()]['expo_t'] / 1000
             self.focus_sample_duration_s = FOCUS_PIEZO_SETTLING_S + FOCUS_MIN_SAMPLES * expo_time_s
         elif self.focus_state == "FIND_SLOPE":
@@ -622,7 +681,9 @@ class Iris():
             if self.total_z_mm() > self.absolute_starting_z_mm + FOCUS_MAX_EXCURSION_MM or \
             self.total_z_mm() < self.absolute_starting_z_mm - FOCUS_MAX_EXCURSION_MM:
                 logging.error("Focus run aborted, Z-excursion limit reached!")
-                self.smart_set_z_mm(self.absolute_starting_z_mm) # reset machine to original state
+                # reset machine to original state
+                self.jubilee.set_axis('z', self.focus_starting_z_machine)
+                self.piezo.set_code(self.focus_starting_z_piezo)
                 self.focus_state = "EXIT"
             if (datetime.datetime.now() - self.step_start).total_seconds() > self.focus_sample_duration_s * (self.focus_retries + 1):
                 logging.debug(f"focus step {self.focus_steps}")
@@ -647,7 +708,11 @@ class Iris():
                         ]
                         # nudge by a focus step (5um for 10x objective)
                         # positive step direction => negative z-height
-                        self.smart_nudge_z_um(FOCUS_STEP_UM * self.step_direction)
+                        if self.smart_nudge_z_um(FOCUS_STEP_UM * self.step_direction):
+                            # We had to adjust machine Z. Restart the search entirely.
+                            logging.warning("Machine Z changed. Restarting focus search.")
+                            self.focus_state = "IDLE"
+                            self.wait_for_machine_settling()
 
                         # report to UI
                         poi = self.current_pos_as_poi()
@@ -709,9 +774,13 @@ class Iris():
                 logging.debug(self.curve_df['total_z'])
                 logging.debug(self.curve_df['focus_metric'])
                 logging.debug(f"coefficients: {coefficients}")
-                logging.info(f"Residual: {residuals}")
-                self.polyfit = residuals[0]
+                # compute MSE of data vs polynomial
+                predicted = np.polyval(coefficients, sorted_curve.loc[max_row - FOCUS_STEPS_MARGIN:max_row + FOCUS_STEPS_MARGIN]['total_z'])
+                mse = mean_squared_error(sorted_curve.loc[max_row - FOCUS_STEPS_MARGIN:max_row + FOCUS_STEPS_MARGIN]['focus_metric'], predicted)
+                logging.info(f"MSE fit: {mse:0.2f}")
+                self.polyfit = mse
                 z_maxima = -coefficients[1] / (2 * coefficients[0])
+                self.predicted_metric = np.polyval(coefficients, [z_maxima])[0]
                 plt.scatter(self.curve_df['total_z'], self.curve_df['focus_metric'])
                 xp = np.linspace(self.curve_df['total_z'].min() - 0.01, self.curve_df['total_z'].max() + 0.01, 100)
                 yp = np.polyval(coefficients, xp)
@@ -723,14 +792,15 @@ class Iris():
                 if z_maxima < self.curve_df['total_z'].min() - AUTOFOCUS_SAFETY_MARGIN_MM \
                 or z_maxima > self.curve_df['total_z'].max() + AUTOFOCUS_SAFETY_MARGIN_MM:
                     logging.error(f"Computed focus is bogus: {z_maxima:0.3f}, [{self.curve_df['total_z'].min():0.3f}, {self.curve_df['total_z'].max():0.3f}]")
-                    self.smart_set_z_mm(self.absolute_starting_z_mm) # reset machine to original state before focus search
+                    # reset machine to original state before focus search
+                    self.jubilee.set_axis('z', self.focus_starting_z_machine)
+                    self.piezo.set_code(self.focus_starting_z_piezo)
                     self.focus_state = "IDLE" # re-run the focus algo again -- could result in infinite loop
                     self.wait_for_machine_settling()
                 else:
-                    if self.polyfit > FOCUS_RSQUARE_LIMIT:
-                        logging.warning(f"Residual is out of limit, retrying...")
-                        self.jubilee.set_axis('z', self.focus_starting_z_machine)
-                        self.piezo.set_code(self.focus_starting_z_piezo)
+                    if self.polyfit > FOCUS_RSQUARE_LIMIT * self.predicted_metric:
+                        logging.warning(f"Residual is out of limit ({FOCUS_RSQUARE_LIMIT * self.predicted_metric:0.2f}), retrying...")
+                        self.smart_set_z_mm(z_maxima) # restart at the last limit that we thought was good
                         self.focus_state = "IDLE"
                         self.wait_for_machine_settling()
                     else:
@@ -815,6 +885,7 @@ class Iris():
         trackers += [piezo_tracker]
 
         profiling = False
+        was_running_focus = False
         while True:
             if profiling:
                 start = datetime.datetime.now()
@@ -827,6 +898,13 @@ class Iris():
             self.fetch_focus_events()
             if self.fine_focus_event.is_set():
                 self.fine_focus()
+                was_running_focus = True
+            else:
+                if was_running_focus:
+                    self.wait_for_machine_settling()
+                    self.focus_ratio = self.final_score / self.predicted_metric
+                    logging.info(f"Predicted metric: {self.predicted_metric}, actual metric: {self.final_score}, ratio: {self.focus_ratio:0.3f}")
+                was_running_focus = False
 
             # Hardware control loop
             msg = self.midi.midi.poll()
@@ -944,12 +1022,8 @@ class Iris():
                                         poi = self.current_pos_as_poi()
                                         self.jubilee_state.put(poi, block=False)
 
-                            elif name == 'quit button':
-                                self.jubilee.motors_off()
-                                self.all_leds_off()
-                                logging.info("Quitting controller...")
-                                cam_quit.set()
-                                return
+                            elif name == 'zset button':
+                                self.set_mid_z()
                             elif name == 'gamma button':
                                 if gamma_enabled:
                                     self.midi.set_led_state(note_id, False)
