@@ -97,7 +97,7 @@ FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than t
 FOCUS_INCREMENTAL_RANGE_UM = 50
 FOCUS_ABSOLUTE_RANGE_UM = 90 # total deviation allowable from the projected Z-plane
 FOCUS_RSQUARE_LIMIT = 0.015 # multiply by mean of focus metric to get max error on fit (think of as %age of metric for fit)
-FOCUS_RATIO_LIMIT = 0.99 # minimum ratio of actual vs predicted focus metric
+FOCUS_RATIO_LIMIT = 0.995 # minimum ratio of actual vs predicted focus metric
 
 cam_quit = Event()
 
@@ -562,8 +562,8 @@ class Iris():
                         # note: the origin of this is that sometimes the focus will latch onto a top mark or the texture
                         # of the silicon backside if there's a lack of interesting features to look at.
                         if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0 or \
-                            self.focus_ratio < FOCUS_RATIO_LIMIT:
-                            if self.focus_ratio < FOCUS_RATIO_LIMIT:
+                            self.focus_ratio <= FOCUS_RATIO_LIMIT:
+                            if self.focus_ratio <= FOCUS_RATIO_LIMIT:
                                 logging.warning(f"Focus ratio out of range: {self.focus_ratio:0.3f} < {FOCUS_RATIO_LIMIT}")
                             else:
                                 logging.warning(f"Focus delta out of range: {int((before_z - self.total_z_mm())*1000)} um, trying again!")
