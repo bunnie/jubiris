@@ -68,14 +68,16 @@ FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
 FOCUS_MIN_SAMPLES = 5
 FOCUS_PIEZO_SETTLING_S = 0.2 # empirically determined settling time
-FOCUS_VARIANCE_THRESH = 8.0 # 1-sigma acceptable deviation for focus data
+FOCUS_VARIANCE_THRESH = 6.0 # 1-sigma acceptable deviation for focus data
 FOCUS_MAX_RETRIES = 10
 FOCUS_MAX_EXCURSION_MM = 0.2
-FOCUS_STEPS_MARGIN = 2 # minimum number of steps required to define one side of the focus curve
+FOCUS_STEPS_MARGIN = 3 # minimum number of steps required to define one side of the focus curve
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
 FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machine has settled
 FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
 FOCUS_INCREMENTAL_RANGE_UM = 30
+FOCUS_ABSOLUTE_RANGE_UM = 150 # total deviation allowable from the projected Z-plane
+FOCUS_RSQUARE_LIMIT = 110.0 # upper limit for RSQUARE fitting
 
 cam_quit = Event()
 
@@ -111,6 +113,8 @@ class ImageNamer:
         self.focus_area = (0, 0) # (x, y) tuple encoding focus area snapping
         self.w = 3840 # expected image total width
         self.h = 2160 # expected image total height
+        self.f = 0 # polynomial fit
+        self.s = 0 # focus score metric
     def is_init(self):
         return self.name is not None and self.x is not None and self.y is not None \
         and self.z is not None and self.p is not None \
@@ -146,7 +150,7 @@ class ImageNamer:
             r = str(self.cur_rep)
         else:
             r = '1'
-        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}'
+        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}_f{self.f:0.1f}_s{int(self.s)}'
 
 # evaluate if the collected focus data meets our quality requirements (is the machine settled)
 # returns True if the data is usable, as well as the statistics on the data
@@ -267,6 +271,8 @@ class Iris():
             "expo_t" : [], # exposure time
         })
         self.focus_state = "IDLE"
+        self.polyfit = 0
+        self.final_score = 0
 
     def all_leds_off(self):
         # turn off all controller LEDs
@@ -368,6 +374,8 @@ class Iris():
         self.image_name.a = self.jubilee.r
         self.image_name.cur_rep = None
         self.image_name.rep = self.args.reps
+        self.image_name.f = self.polyfit
+        self.image_name.s = self.final_score
 
     def automate_flat_image(self):
         # check that the POIs have been set
@@ -464,14 +472,27 @@ class Iris():
                     self.jubilee.goto((x, y, z))
                     self.piezo.set_code(p_lsb)
                 else:
-                    # Re-compute autofocus at each step. Don't use the z-plane as a guideline because
-                    # We want each step to incrementally move from the previous step's focus determination
-                    # under the theory that the focus plane shifts only gradually at each step.
+                    # Dead-reckon to a focus point based on solving the plane equation of the points of interest.
+                    # derive composite-z
+                    zp = -(a * x + b * y + d) / c
+                    # Compute Z partition
+                    (z, p_lsb) = self.partition_z_mm(zp)
+
+                    # Re-compute autofocus at each step, starting from the nominal dead-reckoning point as
+                    # an initial guideline. This prevents us from "drifting" off the chip plane because we
+                    # got distracted with a backside chip feature.
                     logging.info(f"Step to {x:0.2f}, {y:0.2f}")
-                    self.jubilee.goto((x, y, self.jubilee.z))
+                    if abs(self.total_z_mm() - zp) > FOCUS_ABSOLUTE_RANGE_UM / 1000.0:
+                        logging.info("Current focus seems out of range, set back to projected focus plane")
+                        self.jubilee.goto((x, y, z))
+                        self.piezo.set_code(p_lsb)
+                    else:
+                        self.jubilee.goto((x, y, self.jubilee.z))
                     self.wait_for_machine_settling()
 
                     # run focus
+                    before_z_machine = self.jubilee.z
+                    before_z_piezo = self.piezo.code
                     before_z = self.total_z_mm()
                     focus_success = False
                     focus_iters = 0
@@ -486,7 +507,9 @@ class Iris():
                         # note: the origin of this is that sometimes the focus will latch onto a top mark or the texture
                         # of the silicon backside if there's a lack of interesting features to look at.
                         if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0:
-                            self.smart_set_z_mm(before_z)
+                            # reset to the actual Z/code prior, not the interpolated code from composite-Z
+                            self.jubilee.set_axis('z', before_z_machine)
+                            self.piezo.set_code(before_z_piezo)
                             focus_success = False
                             focus_iters += 1
                             # pick a different spot to focus every time
@@ -506,7 +529,8 @@ class Iris():
                         else:
                             focus_success = True
 
-                    self.wait_for_machine_settling()
+                        # settle after each iteration, so we have a fair start to the focus algo!
+                        self.wait_for_machine_settling()
 
                 # setup the image_name object
                 self.set_image_name()
@@ -588,6 +612,8 @@ class Iris():
             self.step_direction = -1 # 1 or -1 for increase or decreasing z value; increased Z is farther from objective
 
             self.absolute_starting_z_mm = self.total_z_mm()
+            self.focus_starting_z_machine = self.jubilee.z
+            self.focus_starting_z_piezo = self.piezo.code
             self.focus_starting_z_mm = self.absolute_starting_z_mm
             expo_time_s = self.focus_df.loc[self.focus_df['time'].idxmax()]['expo_t'] / 1000
             self.focus_sample_duration_s = FOCUS_PIEZO_SETTLING_S + FOCUS_MIN_SAMPLES * expo_time_s
@@ -674,14 +700,17 @@ class Iris():
                 self.focus_state = "FIND_SLOPE"
             else:
                 # fit to 2nd order and find maxima; only use the points directly around the maxima
-                coefficients = np.polyfit(
+                coefficients, residuals, _rank, _sv, _rcond = np.polyfit(
                     sorted_curve.loc[max_row - FOCUS_STEPS_MARGIN:max_row + FOCUS_STEPS_MARGIN]['total_z'],
                     sorted_curve.loc[max_row - FOCUS_STEPS_MARGIN:max_row + FOCUS_STEPS_MARGIN]['focus_metric'],
-                    deg=2
+                    deg=2,
+                    full=True
                 )
                 logging.debug(self.curve_df['total_z'])
                 logging.debug(self.curve_df['focus_metric'])
                 logging.debug(f"coefficients: {coefficients}")
+                logging.info(f"Residual: {residuals}")
+                self.polyfit = residuals[0]
                 z_maxima = -coefficients[1] / (2 * coefficients[0])
                 plt.scatter(self.curve_df['total_z'], self.curve_df['focus_metric'])
                 xp = np.linspace(self.curve_df['total_z'].min() - 0.01, self.curve_df['total_z'].max() + 0.01, 100)
@@ -695,13 +724,21 @@ class Iris():
                 or z_maxima > self.curve_df['total_z'].max() + AUTOFOCUS_SAFETY_MARGIN_MM:
                     logging.error(f"Computed focus is bogus: {z_maxima:0.3f}, [{self.curve_df['total_z'].min():0.3f}, {self.curve_df['total_z'].max():0.3f}]")
                     self.smart_set_z_mm(self.absolute_starting_z_mm) # reset machine to original state before focus search
+                    self.focus_state = "IDLE" # re-run the focus algo again -- could result in infinite loop
+                    self.wait_for_machine_settling()
                 else:
-                    # servo machine to maxima
-                    logging.info(f"Focus point at z={z_maxima:0.3f}mm")
-                    self.smart_set_z_mm(z_maxima)
-
-                # check focus score
-                self.focus_state = "EXIT"
+                    if self.polyfit > FOCUS_RSQUARE_LIMIT:
+                        logging.warning(f"Residual is out of limit, retrying...")
+                        self.jubilee.set_axis('z', self.focus_starting_z_machine)
+                        self.piezo.set_code(self.focus_starting_z_piezo)
+                        self.focus_state = "IDLE"
+                        self.wait_for_machine_settling()
+                    else:
+                        # servo machine to maxima
+                        logging.info(f"Focus point at z={z_maxima:0.3f}mm")
+                        self.smart_set_z_mm(z_maxima)
+                        # check focus score
+                        self.focus_state = "EXIT"
 
         elif self.focus_state == "EXIT":
             # Call this when we're done with fine focus algo...

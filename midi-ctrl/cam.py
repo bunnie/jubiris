@@ -25,12 +25,12 @@ from datetime import datetime
 
 from piezo import PIEZO_UM_PER_LSB
 
-DEFAULT_LAPLACIAN_5X = 3 # this gets multiplied by 2 and 1 added to ensure the result is odd
-DEFAULT_FILTER_5X = 5
-DEFAULT_LAPLACIAN_10X = 4
-DEFAULT_FILTER_10X = 8
-DEFAULT_LAPLACIAN_20X = 7
-DEFAULT_FILTER_20X = 10
+DEFAULT_LAPLACIAN_5X = 7 # this gets multiplied by 2 and 1 added to ensure the result is odd
+DEFAULT_FILTER_5X = 11
+DEFAULT_LAPLACIAN_10X = 5
+DEFAULT_FILTER_10X = 7
+DEFAULT_LAPLACIAN_20X = 15
+DEFAULT_FILTER_20X = 21
 DEFAULT_LAPLACIAN = None
 DEFAULT_FILTER = None
 
@@ -98,6 +98,8 @@ class MainWindow(QMainWindow):
         self.spinbox_expoGain.setValue(INIT_EXPO_GAIN)
         self.spinbox_expoTime.setEnabled(True)
         self.spinbox_expoGain.setEnabled(True)
+        self.spinbox_expoGain.setSingleStep(50)
+        self.spinbox_expoTime.setSingleStep(10)
         exposure_layout = QFormLayout()
         exposure_layout.addRow("Auto Exposure", self.cbox_auto)
         exposure_layout.addRow("Time(ms)", self.spinbox_expoTime)
@@ -122,8 +124,12 @@ class MainWindow(QMainWindow):
         # autofocus image processing
         self.laplacian_spin = QSpinBox()
         self.laplacian_spin.setValue(DEFAULT_LAPLACIAN)
+        self.laplacian_spin.setRange(1, 31)
+        self.laplacian_spin.setSingleStep(2)
         self.filter_spin = QSpinBox()
         self.filter_spin.setValue(DEFAULT_FILTER)
+        self.filter_spin.setRange(1, 31)
+        self.filter_spin.setSingleStep(2)
         self.filter_cbox = QCheckBox()
         self.filter_cbox.setChecked(True)
         self.preview_cbox = QCheckBox()
@@ -203,9 +209,9 @@ class MainWindow(QMainWindow):
 
     # these must be odd numbers, so we wrap them in a function to ensure that
     def get_laplacian(self):
-        return self.laplacian * 2 + 1
+        return self.laplacian
     def get_filter_value(self):
-        return self.filter_value * 2 + 1
+        return self.filter_value
     def onLaplacian(self, value):
         self.laplacian = value
     def onFilterValue(self, value):
