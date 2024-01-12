@@ -160,11 +160,13 @@ class MainWindow(QMainWindow):
         self.label_y = QLabel("0.0")
         self.label_z_offset = QLabel("0.0")
         self.label_piezo_offset = QLabel("0")
+        self.label_z_total = QLabel("0.0")
         autofocus_panel_layout = QFormLayout()
         autofocus_panel_layout.addRow("X", self.label_x)
         autofocus_panel_layout.addRow("Y", self.label_y)
-        autofocus_panel_layout.addRow("Z-height", self.label_z_offset)
-        autofocus_panel_layout.addRow("Piezo", self.label_piezo_offset)
+        autofocus_panel_layout.addRow("Z-mach", self.label_z_offset)
+        autofocus_panel_layout.addRow("Z-piezo", self.label_piezo_offset)
+        autofocus_panel_layout.addRow("Z-total", self.label_z_total)
 
         # fps rating
         self.lbl_frame = QLabel()
@@ -551,14 +553,19 @@ class MainWindow(QMainWindow):
                 while not self.jubilee_state.empty(): # drain the POI queue entirely, keeping only the latest value
                     poi = self.jubilee_state.get(block = False)
                 if poi is not None:
+                    update_z = False
                     if poi.piezo:
                         self.label_piezo_offset.setText(f"{poi.piezo}({(poi.piezo * PIEZO_UM_PER_LSB):0.2f}um)")
+                        update_z = True
                     if poi.z:
                         self.label_z_offset.setText(f"{poi.z:0.2f}mm")
+                        update_z = True
                     if poi.x:
                         self.label_x.setText(f"{poi.x:0.2f}mm")
                     if poi.y:
                         self.label_y.setText(f"{poi.y:0.2f}mm")
+                    if update_z:
+                        self.label_z_total.setText(f"{(poi.z - (poi.piezo * PIEZO_UM_PER_LSB) / 1000.0):0.4f}mm")
             except queue.Empty:
                 pass
 

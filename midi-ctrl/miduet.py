@@ -68,16 +68,16 @@ FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
 FOCUS_MIN_SAMPLES = 5
 FOCUS_PIEZO_SETTLING_S = 0.2 # empirically determined settling time
-FOCUS_VARIANCE_THRESH = 6.0 # 1-sigma acceptable deviation for focus data
-FOCUS_MAX_RETRIES = 10
+FOCUS_VARIANCE_THRESH = 1.1 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
+FOCUS_MAX_RETRIES = 15
 FOCUS_MAX_EXCURSION_MM = 0.2
 FOCUS_STEPS_MARGIN = 3 # minimum number of steps required to define one side of the focus curve
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
 FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machine has settled
 FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
-FOCUS_INCREMENTAL_RANGE_UM = 30
-FOCUS_ABSOLUTE_RANGE_UM = 150 # total deviation allowable from the projected Z-plane
-FOCUS_RSQUARE_LIMIT = 110.0 # upper limit for RSQUARE fitting
+FOCUS_INCREMENTAL_RANGE_UM = 20
+FOCUS_ABSOLUTE_RANGE_UM = 90 # total deviation allowable from the projected Z-plane
+FOCUS_RSQUARE_LIMIT = 100.0 # upper limit for RSQUARE fitting
 
 cam_quit = Event()
 
@@ -973,6 +973,9 @@ class Iris():
                                     self.automate_theta_image()
                                 else:
                                     logging.error("Unrecognized automation type, doing nothing.")
+                                # update UI with final focus solution
+                                poi = self.current_pos_as_poi()
+                                self.jubilee_state.put(poi, block=False)
 
                                 logging.info("Automation done!")
                                 if self.args.auto_quit:
