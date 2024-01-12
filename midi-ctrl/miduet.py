@@ -70,6 +70,8 @@ MAX_GAMMA = 2.0
 # 3. Adjust laplacian & filter to get the strogest positive signal for "focusedness".
 #    Note that some settings actually create a strong signal for out of focusedness, and
 #    the precise setting will depend a bit on the fabrication process being imaged.
+#    Other notes: a standard cell region will do worse with over-filtering (>7), but
+#    coarser regions like pad drivers might do better. Try and pick a compromise.
 # 4. Observe the steady state variance, and set the FOCUS_VARIANCE_THRESH to that.
 # 5. Go to the top left, and focus the region. Set is as the first POI.
 # 6. Hit the "mid-z" button to put the mechanical Z into the mid zone of the piezo actuator
@@ -80,7 +82,7 @@ MAX_GAMMA = 2.0
 # 11. Make sure we're focused.
 # 12. Start the stitching run.
 
-FOCUS_VARIANCE_THRESH = 20.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
+FOCUS_VARIANCE_THRESH = 10.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
 FOCUS_MAX_HISTORY = 2000
 FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching

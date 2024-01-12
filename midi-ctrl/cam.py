@@ -28,7 +28,7 @@ from piezo import PIEZO_UM_PER_LSB
 DEFAULT_LAPLACIAN_5X = 7
 DEFAULT_FILTER_5X = 11
 DEFAULT_LAPLACIAN_10X = 7 # 9  note: fiddle with focus and see if we can manually use the graph to focus. Params depends on the chip node?
-DEFAULT_FILTER_10X = 9    # 17
+DEFAULT_FILTER_10X = 7    # 17 SET VARIANCE if changing these!
 DEFAULT_LAPLACIAN_20X = 15
 DEFAULT_FILTER_20X = 21
 DEFAULT_LAPLACIAN = None
