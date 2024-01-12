@@ -127,8 +127,9 @@ M208 V-190:190         ; Set rotation (V axis) min and max rotation angle
 M950 J1 C"io2.in"
 M581 P1 T0 S1 R0
 
-; Idle motors after a brief peried of inactivity to quite down PWM modulation affecting focus
-M84 S1
+; Don't allow idle to happen too fast. This should be set to a limit somewhat
+; over the expected time it takes to focus and shoot.
+M84 S120
 
 M98  P"/sys/toffsets.g" ; Load tool offsets from the Control Point from ext file.
 M501                    ; Load saved parameters from config-override.g
