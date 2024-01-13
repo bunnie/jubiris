@@ -652,20 +652,17 @@ def snapper(w, auto_snap_event, auto_snap_done):
         auto_snap_event.clear()
         if w.image_name.quit:
             break
-        if w.image_name.rep is not None:
-            rep = int(w.image_name.rep) + 1 # +1 for the dummy exposure
-        else:
-            rep = 2
+        # throw away the first rep because the exposure is off
+        rep = 2
         for i in range(rep):
             if i == 0:
                 w.image_name.dummy = True
             else:
                 w.image_name.dummy = False
-            w.image_name.cur_rep = i
+            w.image_name.cur_rep = w.image_name.rep
             w.hcam.Snap(0)
             w.single_snap_done.wait()
             w.single_snap_done.clear()
-            w.image_name.cur_rep = None
         auto_snap_done.set()
     # close the main window upon reaching quit
     w.closeCamera()

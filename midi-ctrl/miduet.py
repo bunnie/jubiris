@@ -82,7 +82,7 @@ MAX_GAMMA = 2.0
 # 11. Make sure we're focused.
 # 12. Start the stitching run.
 
-FOCUS_VARIANCE_THRESH = 10.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
+FOCUS_VARIANCE_THRESH = 36.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
 FOCUS_MAX_HISTORY = 2000
 FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
@@ -96,7 +96,7 @@ FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machin
 FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
 FOCUS_INCREMENTAL_RANGE_UM = 50
 FOCUS_ABSOLUTE_RANGE_UM = 90 # total deviation allowable from the projected Z-plane
-FOCUS_RSQUARE_LIMIT = 0.015 # multiply by mean of focus metric to get max error on fit (think of as %age of metric for fit)
+FOCUS_RSQUARE_LIMIT = 0.03 # multiply by mean of focus metric to get max error on fit (think of as %age of metric for fit)
 FOCUS_RATIO_LIMIT = 0.995 # minimum ratio of actual vs predicted focus metric
 
 cam_quit = Event()
@@ -413,7 +413,7 @@ class Iris():
                 # update so that we have a sliding window for settling
                 self.settling_start = now - datetime.timedelta(seconds=settling_window)
 
-    def set_image_name(self):
+    def set_image_name(self, rep=1):
         self.image_name.x = self.jubilee.x
         self.image_name.y = self.jubilee.y
         self.image_name.z = self.jubilee.z
@@ -424,7 +424,7 @@ class Iris():
         self.image_name.u = self.light.angle_remote
         self.image_name.a = self.jubilee.r
         self.image_name.cur_rep = None
-        self.image_name.rep = self.args.reps
+        self.image_name.rep = rep
         self.image_name.f = self.polyfit
         self.image_name.s = self.final_score
         self.image_name.v = self.focus_ratio
@@ -501,111 +501,114 @@ class Iris():
                     focus_area_y = ImageNamer.FOCUS_TOP
                 else:
                     focus_area_y = ImageNamer.FOCUS_CENTER
-                self.image_name.set_focus_area((focus_area_x, focus_area_y))
 
-                if not self.args.dynamic_focus:
-                    # Dead-reckon to a focus point based on solving the plane equation of the points of interest.
-                    # derive composite-z
-                    zp = -(a * x + b * y + d) / c
+                for rep in range(self.args.reps):
+                    self.image_name.set_focus_area((focus_area_x, focus_area_y))
 
-                    # Compute Z partition
-                    (z, p_lsb) = self.partition_z_mm(zp)
-
-                    # check values
-                    if p_lsb > PIEZO_MAX_CODE:
-                        logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
-                        continue
-                    if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
-                        logging.warning(f"Z value seems hazardous, aborting step: {z}")
-                        continue
-                    if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
-                        logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
-                        continue
-
-                    logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
-                    self.jubilee.goto((x, y, z))
-                    self.piezo.set_code(p_lsb)
-                else:
-                    # Re-compute autofocus at each step
-                    logging.info(f"Step to {x:0.2f}, {y:0.2f}")
-                    # Check if we have drifted off the ideal plane
-                    zp = -(a * x + b * y + d) / c
-                    if abs(self.total_z_mm() - zp) > FOCUS_ABSOLUTE_RANGE_UM / 1000.0:
-                        logging.warning("Current focus seems out of range, set back to projected focus plane")
+                    if not self.args.dynamic_focus:
                         # Dead-reckon to a focus point based on solving the plane equation of the points of interest.
-                        self.smart_set_z_mm(zp)
+                        # derive composite-z
+                        zp = -(a * x + b * y + d) / c
+
+                        # Compute Z partition
+                        (z, p_lsb) = self.partition_z_mm(zp)
+
+                        # check values
+                        if p_lsb > PIEZO_MAX_CODE:
+                            logging.warning(f"Piezo value out of bounds: {p_lsb}, aborting step")
+                            continue
+                        if z > 15.0 or z < 5.0: # safety band over initial value of Z=10.0
+                            logging.warning(f"Z value seems hazardous, aborting step: {z}")
+                            continue
+                        if x > 20.0 or x < -20.0 or y > 20.0 or y < -20.0:
+                            logging.warning(f"X or Y value seems hazardous, aborting: {x}, {y}")
+                            continue
+
+                        logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
+                        self.jubilee.goto((x, y, z))
+                        self.piezo.set_code(p_lsb)
                     else:
-                        # Otherwise, preserve the previous Z-setting
-                        self.jubilee.goto((x, y, self.jubilee.z))
-                    self.wait_for_machine_settling()
-
-                    # run focus
-                    before_z_machine = self.jubilee.z
-                    before_z_piezo = self.piezo.code
-                    before_z = self.total_z_mm()
-                    focus_success = False
-                    focus_iters = 0
-                    while not focus_success:
-                        self.focus_automation = True
-                        self.fine_focus_event.set()
-                        while self.fine_focus_event.is_set():
-                            self.fetch_focus_events()
-                            self.fine_focus()
-                        self.focus_automation = False
-
-                        # settle after each iteration, so we have a fair start to the focus algo, and we can compute focus ratio!
-                        self.wait_for_machine_settling()
-                        self.focus_ratio = self.final_score / self.predicted_metric
-
-                        # if the focus step took us out of a narrow range, or if our prediction was off,
-                        # guess that we really messed up and try again.
-                        # note: the origin of this is that sometimes the focus will latch onto a top mark or the texture
-                        # of the silicon backside if there's a lack of interesting features to look at.
-                        if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0 or \
-                            self.focus_ratio <= FOCUS_RATIO_LIMIT:
-                            if self.focus_ratio <= FOCUS_RATIO_LIMIT:
-                                logging.warning(f"Focus ratio out of range: {self.focus_ratio:0.3f} < {FOCUS_RATIO_LIMIT}")
-                            else:
-                                logging.warning(f"Focus delta out of range: {int((before_z - self.total_z_mm())*1000)} um, trying again!")
-                            # reset to the actual Z/code prior, not the interpolated code from composite-Z
-                            self.jubilee.set_axis('z', before_z_machine)
-                            self.piezo.set_code(before_z_piezo)
-                            focus_success = False
-                            focus_iters += 1
-                            # pick a different spot to focus every time after the first basic retry
-                            if focus_iters == 2:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_TOP))
-                            elif focus_iters == 3:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_TOP))
-                            elif focus_iters == 4:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_CENTER))
-                            elif focus_iters == 5:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_RIGHT, ImageNamer.FOCUS_CENTER))
-                            elif focus_iters == 6:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_BOTTOM))
-                            else:
-                                self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_CENTER))
-                            if focus_iters > 7:
-                                logging.warning("Focus failed to converge, keeping previous Z-height.")
-                                break
+                        # Re-compute autofocus at each step
+                        logging.info(f"Step to {x:0.2f}, {y:0.2f}")
+                        # Check if we have drifted off the ideal plane
+                        zp = -(a * x + b * y + d) / c
+                        if abs(self.total_z_mm() - zp) > FOCUS_ABSOLUTE_RANGE_UM / 1000.0:
+                            logging.warning("Current focus seems out of range, set back to projected focus plane")
+                            # Dead-reckon to a focus point based on solving the plane equation of the points of interest.
+                            self.smart_set_z_mm(zp)
                         else:
-                            focus_success = True
+                            # Otherwise, preserve the previous Z-setting
+                            self.jubilee.goto((x, y, self.jubilee.z))
+                        self.wait_for_machine_settling()
 
-                logging.info(f"Predicted metric: {self.predicted_metric}, actual metric: {self.final_score}, ratio: {self.focus_ratio:0.3f}")
-                # setup the image_name object
-                self.set_image_name()
-                if not self.args.dynamic_focus:
-                    # wait for system to settle
-                    logging.info(f"settling for {self.args.settling}s")
-                    time.sleep(self.args.settling)
-                # this should trigger the picture
-                logging.info(f"triggering photos")
-                self.auto_snap_event.set()
-                self.auto_snap_done.wait()
-                logging.info(f"got photo done event")
-                # reset the flags
-                self.auto_snap_event.clear()
-                self.auto_snap_done.clear()
+                        # run focus
+                        before_z_machine = self.jubilee.z
+                        before_z_piezo = self.piezo.code
+                        before_z = self.total_z_mm()
+                        focus_success = False
+                        focus_iters = 0
+                        while not focus_success:
+                            self.focus_automation = True
+                            self.fine_focus_event.set()
+                            while self.fine_focus_event.is_set():
+                                self.fetch_focus_events()
+                                self.fine_focus()
+                                time.sleep(0.01) # yield our quantum
+                            self.focus_automation = False
+
+                            # settle after each iteration, so we have a fair start to the focus algo, and we can compute focus ratio!
+                            self.wait_for_machine_settling()
+                            self.focus_ratio = self.final_score / self.predicted_metric
+
+                            # if the focus step took us out of a narrow range, or if our prediction was off,
+                            # guess that we really messed up and try again.
+                            # note: the origin of this is that sometimes the focus will latch onto a top mark or the texture
+                            # of the silicon backside if there's a lack of interesting features to look at.
+                            if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0 or \
+                                self.focus_ratio <= FOCUS_RATIO_LIMIT:
+                                if self.focus_ratio <= FOCUS_RATIO_LIMIT:
+                                    logging.warning(f"Focus ratio out of range: {self.focus_ratio:0.3f} < {FOCUS_RATIO_LIMIT}")
+                                else:
+                                    logging.warning(f"Focus delta out of range: {int((before_z - self.total_z_mm())*1000)} um, trying again!")
+                                # reset to the actual Z/code prior, not the interpolated code from composite-Z
+                                self.jubilee.set_axis('z', before_z_machine)
+                                self.piezo.set_code(before_z_piezo)
+                                focus_success = False
+                                focus_iters += 1
+                                # pick a different spot to focus every time after the first basic retry
+                                if focus_iters == 2:
+                                    self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_TOP))
+                                elif focus_iters == 3:
+                                    self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_TOP))
+                                elif focus_iters == 4:
+                                    self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_CENTER))
+                                elif focus_iters == 5:
+                                    self.image_name.set_focus_area((ImageNamer.FOCUS_RIGHT, ImageNamer.FOCUS_CENTER))
+                                elif focus_iters == 6:
+                                    self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_BOTTOM))
+                                else:
+                                    self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_CENTER))
+                                if focus_iters > 7:
+                                    logging.warning("Focus failed to converge, keeping previous Z-height.")
+                                    break
+                            else:
+                                focus_success = True
+
+                    logging.info(f"Predicted metric: {self.predicted_metric}, actual metric: {self.final_score}, ratio: {self.focus_ratio:0.3f}")
+                    # setup the image_name object
+                    self.set_image_name(rep=rep+1)
+                    if not self.args.dynamic_focus:
+                        # wait for system to settle
+                        logging.info(f"settling for {self.args.settling}s")
+                        time.sleep(self.args.settling)
+                    # this should trigger the picture
+                    logging.info(f"triggering photos")
+                    self.auto_snap_event.set()
+                    self.auto_snap_done.wait()
+                    logging.info(f"got photo done event")
+                    # reset the flags
+                    self.auto_snap_event.clear()
+                    self.auto_snap_done.clear()
 
         # reset the head to POI 1 (the origin of the scan) - makes it easier to fix up & rescan later
         # note that nothing prevents you from swapping the POI, it just makes your life harder. "don't do that, stupid".
@@ -848,6 +851,7 @@ class Iris():
             if len(self.focus_df) > FOCUS_MAX_HISTORY:
                 # cull some history to prevent storage problems
                 self.focus_df = self.focus_df.tail(-FOCUS_MAX_HISTORY // 2)
+            time.sleep(0.01) # yield quantum
 
     def loop(self):
         # clear any stray events in the queue
