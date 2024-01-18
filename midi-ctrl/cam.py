@@ -202,6 +202,7 @@ class MainWindow(QMainWindow):
         # Place overview and preview in the same V-box
         self.lbl_video = QLabel()
         self.lbl_fullres = QLabel()
+        self.lbl_fullres.setMinimumWidth(FOCUS_AREA_PX)
         v_video = QVBoxLayout()
         v_video.addWidget(self.lbl_video)
         v_video.addWidget(self.lbl_fullres)
@@ -529,29 +530,18 @@ class MainWindow(QMainWindow):
             if profiling:
                 logging.info(f"before: {datetime.now() - start}")
                 start = datetime.now()
-            # autofocus mechanisms
-            if False:
-                if self.image_queue is not None:
-                    if not self.image_queue.full():
-                        cv2_image = qimage2ndarray.rgb_view(image)
-                        self.image_queue.put(cv2_image)
-                    else:
-                        logging.debug("Image queue overflow, image dropped")
-                if self.ui_queue is not None:
-                    try:
-                        ui_img = self.ui_queue.get(block=False)
-                    except queue.Empty:
-                        pass
-                    else:
-                        cv2.imshow("focus", ui_img)
 
+            # convert raw image to a cv2 image
             cv2_image = cv2.cvtColor(qimage2ndarray.rgb_view(centerimage), cv2.COLOR_RGB2GRAY)
+
             # extract a histogram
-            hist = cv2.calcHist(cv2_image, [0], None, [256], (0, 256), accumulate=False)
+            hist = cv2.calcHist([cv2_image], [0], None, [256], (0, 256), accumulate=False)
             hist_bitmap = self.draw_hist(hist)
             self.histo.setPixmap(QPixmap.fromImage(
                 QImage(hist_bitmap, hist_bitmap.shape[1], hist_bitmap.shape[0], hist_bitmap.shape[1] * 3, QImage.Format_RGB888)
             ))
+
+            # autofocus mechanisms
             cv2_image = np.clip(cv2_image, None, int(self.histo_cutoff.value()))
 
             # extract focus
