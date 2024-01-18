@@ -34,6 +34,8 @@ DEFAULT_FILTER_20X = 21
 DEFAULT_LAPLACIAN = None
 DEFAULT_FILTER = None
 
+DEFAULT_HISTO_CUTOFF = 160
+
 FOCUS_AREA_PX = 1536
 GRAPH_WINDOW = 50
 USE_GAMMA = False
@@ -137,6 +139,9 @@ class MainWindow(QMainWindow):
         self.normalize_cbox = QCheckBox()
         self.normalize_cbox.setChecked(False)
         self.focus_variance = QLabel("0.0")
+        self.histo_cutoff = QSpinBox()
+        self.histo_cutoff.setRange(0, 255)
+        self.histo_cutoff.setValue(DEFAULT_HISTO_CUTOFF)
         adjustment_fields_layout = QFormLayout()
         adjustment_fields_layout.addRow("Laplacian", self.laplacian_spin)
         adjustment_fields_layout.addRow("Filter", self.filter_spin)
@@ -144,6 +149,7 @@ class MainWindow(QMainWindow):
         adjustment_fields_layout.addRow("Normalize Enable", self.normalize_cbox)
         adjustment_fields_layout.addRow("Raw Preview", self.preview_cbox)
         adjustment_fields_layout.addRow("Focus Variance", self.focus_variance)
+        adjustment_fields_layout.addRow("Brightness cutoff", self.histo_cutoff)
         self.laplacian = DEFAULT_LAPLACIAN
         self.laplacian_spin.valueChanged.connect(self.onLaplacian)
         self.filter_value = DEFAULT_FILTER
@@ -173,6 +179,11 @@ class MainWindow(QMainWindow):
 
         # build a graph area
         self.graph = QLabel()
+        self.graph.setMinimumWidth(500)
+
+        # build a histogram area
+        self.histo = QLabel()
+        self.histo.setMinimumWidth(530)
 
         # assemble the control panel horizontally
         hlyt_ctrl = QHBoxLayout()
@@ -181,6 +192,7 @@ class MainWindow(QMainWindow):
         hlyt_ctrl.addLayout(autofocus_panel_layout)
         hlyt_ctrl.addLayout(adjustment_fields_layout)
         hlyt_ctrl.addWidget(self.graph)
+        hlyt_ctrl.addWidget(self.histo)
         hlyt_ctrl.addStretch()
         hlyt_ctrl.addLayout(button_cluster)
         wg_ctrl = QWidget()
@@ -282,6 +294,35 @@ class MainWindow(QMainWindow):
         )
         return canvas
 
+    def draw_hist(self, hist, w=530, h=500):
+        canvas = np.full((h, w, 3), 255, dtype=np.uint8)
+        # add some border
+        w_buf = (w - 512) // 2
+        h_full = h
+        h = int(h * 0.9)
+        h_buf = (h_full - h) // 2
+        # renormalize the histogram data to fill the height of the drawing area
+        cv2.normalize(hist, hist, alpha=0, beta=h, norm_type=cv2.NORM_MINMAX)
+        # this is, in practice, 1 or 2, giving a graph that is either 256 or 512 pixels wide
+        # make this explicit, instead of computed, because the quantization is so stark
+        bin_w = 2 # int(round(w / 256))
+        for i in range(1, 256):
+            cv2.line(
+                canvas,
+                (bin_w * (i-1) + w_buf, h - int(hist[i-1]) + h_buf),
+                (bin_w * (i) + w_buf, h - int(hist[i]) + h_buf),
+                (80, 80, 170),
+                thickness=2
+            )
+        cv2.line(
+            canvas,
+            (bin_w * int(self.histo_cutoff.value()) + w_buf, 0),
+            (bin_w * int(self.histo_cutoff.value()) + w_buf, h_full),
+            (180, 40, 60),
+            thickness=1
+        )
+        return canvas
+
     def onTimer(self):
         if self.hcam:
             nFrame, nTime, nTotalFrame = self.hcam.get_FrameRate()
@@ -293,12 +334,15 @@ class MainWindow(QMainWindow):
         self.hcam = None
         self.pData = None
 
-        self.timer.stop()
-        self.lbl_frame.clear()
-        self.cbox_auto.setEnabled(False)
-        self.spinbox_expoGain.setEnabled(False)
-        self.spinbox_expoTime.setEnabled(False)
-        self.btn_snap.setEnabled(False)
+        try:
+            self.timer.stop()
+            self.lbl_frame.clear()
+            self.cbox_auto.setEnabled(False)
+            self.spinbox_expoGain.setEnabled(False)
+            self.spinbox_expoTime.setEnabled(False)
+            self.btn_snap.setEnabled(False)
+        except:
+            pass
 
     def closeEvent(self, event):
         self.closeCamera()
@@ -502,6 +546,15 @@ class MainWindow(QMainWindow):
                         cv2.imshow("focus", ui_img)
 
             cv2_image = cv2.cvtColor(qimage2ndarray.rgb_view(centerimage), cv2.COLOR_RGB2GRAY)
+            # extract a histogram
+            hist = cv2.calcHist(cv2_image, [0], None, [256], (0, 256), accumulate=False)
+            hist_bitmap = self.draw_hist(hist)
+            self.histo.setPixmap(QPixmap.fromImage(
+                QImage(hist_bitmap, hist_bitmap.shape[1], hist_bitmap.shape[0], hist_bitmap.shape[1] * 3, QImage.Format_RGB888)
+            ))
+            cv2_image = np.clip(cv2_image, None, int(self.histo_cutoff.value()))
+
+            # extract focus
             if self.filter_enable:
                 cv2_image = cv2.GaussianBlur(cv2_image, (self.get_filter_value(), self.get_filter_value()), 0)
                 # cv2_image = cv2.medianBlur(cv2_image, self.get_filter_value())
@@ -665,8 +718,11 @@ def snapper(w, auto_snap_event, auto_snap_done):
             w.single_snap_done.clear()
         auto_snap_done.set()
     # close the main window upon reaching quit
-    w.closeCamera()
-    w.close()
+    try:
+        w.closeCamera()
+        w.close()
+    except:
+        pass
 
 
 def cam(cam_quit, gamma, image_name,
