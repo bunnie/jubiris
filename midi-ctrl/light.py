@@ -281,8 +281,8 @@ class Light:
             self.send_cmd("R 0")
             self.intensity_remote = 0
             # park the emitters near the bottom
-            self.set_angle('local', self.lower_angle_limit['local'] + 3 * math.pi, movement_time=2.0)
-            self.set_angle('remote', self.lower_angle_limit['remote'] + 3 * math.pi, movement_time=2.0)
+            self.set_angle('local', self.lower_angle_limit['local'] + 10 * math.pi, movement_time=1.5)
+            self.set_angle('remote', self.lower_angle_limit['remote'] + 10 * math.pi, movement_time=1.5)
             self.coast('local')
             self.coast('remote')
             self.ser.close()
