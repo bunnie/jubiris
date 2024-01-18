@@ -6,7 +6,7 @@ import math
 
 MAX_LIGHT = 4096
 
-def send_tranjectory(iq_module, time_cmd, angle_cmd):
+def send_trajectory(iq_module, time_cmd, angle_cmd):
     iq_module.set(
         "multi_turn_angle_control", "trajectory_angular_displacement", angle_cmd
     )
@@ -59,17 +59,25 @@ class Light:
         self.upper_angle_limit = {}
         self.lower_angle_limit = {}
 
+        # put both motors into coast so if a limit switch problem is found, we can manually adjust...
+        self.coast('remote')
+        self.coast('local')
+
         logging.info("Homing remote light...")
         self.home_angle('remote')
         logging.info("Homing local light...")
         self.home_angle('local')
+
+        # drop the motors into "coast" so we can manually adjust if necessary
+        self.coast('remote')
+        self.coast('local')
 
     def read_angle(self, which):
         return self.iq[which].get("multi_turn_angle_control", "obs_angular_displacement")
     def nudge_angle(self, which, how_much, movement_time=0.1):
         self.cur_angle[which] = self.read_angle(which)
         new_angle = self.cur_angle[which] + how_much
-        send_tranjectory(self.iq[which], movement_time, new_angle)
+        send_trajectory(self.iq[which], movement_time, new_angle)
         time.sleep(movement_time)
         self.cur_angle[which] = self.read_angle(which)
     def set_angle(self, which, angle, movement_time=0.2):
@@ -84,9 +92,11 @@ class Light:
         if slew > MAX_SLEW:
             movement_time = abs(self.cur_angle[which] - angle) / MAX_SLEW
 
-        send_tranjectory(self.iq[which], movement_time, angle)
+        send_trajectory(self.iq[which], movement_time, angle)
         time.sleep(movement_time)
         self.cur_angle[which] = self.read_angle(which)
+    def coast(self, which):
+        self.iq[which].coast()
 
     def other_motor(self, which):
         if which == 'local':
@@ -273,5 +283,7 @@ class Light:
             # park the emitters near the bottom
             self.set_angle('local', self.lower_angle_limit['local'] + 3 * math.pi, movement_time=2.0)
             self.set_angle('remote', self.lower_angle_limit['remote'] + 3 * math.pi, movement_time=2.0)
+            self.coast('local')
+            self.coast('remote')
             self.ser.close()
             logging.debug("Serial port closed")
