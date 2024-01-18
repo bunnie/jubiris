@@ -82,7 +82,7 @@ MAX_GAMMA = 2.0
 # 11. Make sure we're focused.
 # 12. Start the stitching run.
 
-FOCUS_VARIANCE_THRESH = 36.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
+FOCUS_VARIANCE_THRESH = 11.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
 FOCUS_MAX_HISTORY = 2000
 FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
@@ -94,8 +94,8 @@ FOCUS_STEPS_MARGIN = 2 # minimum number of steps required to define one side of 
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
 FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machine has settled
 FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
-FOCUS_INCREMENTAL_RANGE_UM = 50
-FOCUS_ABSOLUTE_RANGE_UM = 90 # total deviation allowable from the projected Z-plane
+FOCUS_INCREMENTAL_RANGE_UM = 10
+FOCUS_ABSOLUTE_RANGE_UM = 25 # total deviation allowable from the projected Z-plane
 FOCUS_RSQUARE_LIMIT = 0.03 # multiply by mean of focus metric to get max error on fit (think of as %age of metric for fit)
 FOCUS_RATIO_LIMIT = 0.995 # minimum ratio of actual vs predicted focus metric
 
@@ -475,8 +475,6 @@ class Iris():
         a, b, c = normal_vector
         d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
 
-        self.set_mid_z()
-
         logging.info(f"stepping x {x_path}")
         logging.info(f"stepping y {y_path}")
 
@@ -677,7 +675,7 @@ class Iris():
             self.step_start = datetime.datetime.now()
             self.focus_steps = 0
             self.focus_retries = 0
-            self.step_direction = -1 # 1 or -1 for increase or decreasing z value; increased Z is farther from objective
+            self.step_direction = 1 # 1 or -1 for increase or decreasing z value; increased Z is farther from objective
 
             expo_time_s = self.focus_df.loc[self.focus_df['time'].idxmax()]['expo_t'] / 1000
             self.focus_sample_duration_s = FOCUS_PIEZO_SETTLING_S + FOCUS_MIN_SAMPLES * expo_time_s
