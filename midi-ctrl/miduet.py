@@ -94,16 +94,23 @@ FOCUS_STEPS_MARGIN = 2 # minimum number of steps required to define one side of 
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
 FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machine has settled
 FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
-FOCUS_INCREMENTAL_RANGE_UM = 10
+FOCUS_INCREMENTAL_RANGE_UM = 12
 FOCUS_ABSOLUTE_RANGE_UM = 25 # total deviation allowable from the projected Z-plane
 FOCUS_RSQUARE_LIMIT = 0.03 # multiply by mean of focus metric to get max error on fit (think of as %age of metric for fit)
 FOCUS_RATIO_LIMIT = 0.995 # minimum ratio of actual vs predicted focus metric
+FOCUS_HISTO_LIMIT = 85.0 # percentage of image that should be within histogram limits
 
 cam_quit = Event()
 
 class Gamma:
     def __init__(self):
         self.gamma = 1.0
+
+class CustomEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Poi):
+            return obj.__json_default__()
+        return super().default(obj)
 
 # A class for shared state to name image frames. Protected by
 # the auto_snap_event and auto_snap_done Events. The object is
@@ -136,6 +143,8 @@ class ImageNamer:
         self.f = 0 # polynomial fit
         self.s = 0 # focus score metric
         self.v = 0 # predicted vs actual ratio
+        self.d = 0 # delta off of projected plane in microns
+        self.o = 0 # histogram ratio of focus area
     def is_init(self):
         return self.name is not None and self.x is not None and self.y is not None \
         and self.z is not None and self.p is not None \
@@ -150,6 +159,19 @@ class ImageNamer:
     # For example, (0, 0) means center; (1, 0) means "align to right center",
     # (1, -1) means "align to top right". Only the sign of the argument matters,
     # the magnitude is ignored.
+    @staticmethod
+    def get_alt_focus_list():
+        return [
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 0),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ]
     def set_focus_area(self, fa: (int, int)):
         self.focus_area = fa
     def get_focus_rect(self):
@@ -171,7 +193,7 @@ class ImageNamer:
             r = str(self.cur_rep)
         else:
             r = '1'
-        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}_f{self.f:0.1f}_s{int(self.s)}_v{self.v:0.3f}'
+        return f'x{self.x:0.2f}_y{self.y:0.2f}_z{self.z:0.2f}_p{int(self.p)}_i{int(self.i)}_t{int(self.t)}_j{int(self.j)}_u{int(self.u)}_a{self.a:0.1f}_r{int(r)}_f{self.f:0.1f}_s{int(self.s)}_v{self.v:0.3f}_d{self.d:0.1f}_o{self.o:0.1f}'
 
 # evaluate if the collected focus data meets our quality requirements (is the machine settled)
 # returns True if the data is usable, as well as the statistics on the data
@@ -290,12 +312,15 @@ class Iris():
             "quality" : [], # quality check metric: unchecked, good, bad
             "expo_g" : [], # exposure gain
             "expo_t" : [], # exposure time
+            "histo" : [], # histogram ratio - how much of the histogram is within the brightness threshold
         })
         self.focus_state = "IDLE"
         self.polyfit = 0
         self.final_score = 0
         self.predicted_metric = 0
         self.focus_ratio = 0
+        self.plane_offset_um = 0
+        self.histo_ratio = 0
 
     def all_leds_off(self):
         # turn off all controller LEDs
@@ -428,6 +453,8 @@ class Iris():
         self.image_name.f = self.polyfit
         self.image_name.s = self.final_score
         self.image_name.v = self.focus_ratio
+        self.image_name.d = self.plane_offset_um
+        self.image_name.o = self.histo_ratio
 
     def automate_flat_image(self):
         # check that the POIs have been set
@@ -475,9 +502,20 @@ class Iris():
         a, b, c = normal_vector
         d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
 
+        # output some params for debugging later on
+        debug_fname = self.image_name.name + '/' + 'debug.json'
+        debug = {
+            'poi0' : self.jubilee.poi[0],
+            'poi1' : self.jubilee.poi[1],
+            'poi2' : self.jubilee.poi[2],
+            'plane' : [a, b, c, d],
+        }
+        with open(debug_fname, 'w') as debugf:
+            json.dump(debug, debugf, indent=2, cls=CustomEncoder)
+
         logging.info(f"stepping x {x_path}")
         logging.info(f"stepping y {y_path}")
-
+        was_dead_reckon = False
         for i, x in enumerate(x_path):
             # track y in a serpentine to reduce machine movement (otherwise y-jogs from max to min every strip)
             if i % 2 == 0:
@@ -544,25 +582,51 @@ class Iris():
                         before_z_piezo = self.piezo.code
                         before_z = self.total_z_mm()
                         focus_success = False
-                        focus_iters = 0
+                        # alt_focus_list is a list of alternate focus points to try
+                        alt_focus_list = ImageNamer.get_alt_focus_list()
+                        # remove the area that we are trying first from the list
+                        alt_focus_list = [spot for spot in alt_focus_list if spot != (focus_area_x, focus_area_y)]
                         while not focus_success:
                             self.focus_automation = True
                             self.fine_focus_event.set()
                             while self.fine_focus_event.is_set():
                                 self.fetch_focus_events()
-                                self.fine_focus()
+                                histo = self.focus_df.loc[self.focus_df['time'].idxmax()]['histo']
+                                if histo > FOCUS_HISTO_LIMIT:
+                                    self.fine_focus()
+                                else:
+                                    if len(alt_focus_list) > 0:
+                                        next_region = alt_focus_list.pop()
+                                        logging.info(f"Histogram is bad: {histo:0.1f}, trying a new region: {next_region}")
+                                        self.image_name.set_focus_area(next_region)
+                                        time.sleep(0.3) # give some time for images to accumulate
+                                    else:
+                                        logging.info(f"Failed to find any usable regions, dead-recokning to {zp}")
+                                        self.smart_set_z_mm(zp) # dead-reckon to interpolated focus
+                                        focus_success = True
+                                        was_dead_reckon = True
+                                        break
                                 time.sleep(0.01) # yield our quantum
                             self.focus_automation = False
 
                             # settle after each iteration, so we have a fair start to the focus algo, and we can compute focus ratio!
                             self.wait_for_machine_settling()
                             self.focus_ratio = self.final_score / self.predicted_metric
+                            self.plane_offset_um = (before_z - self.total_z_mm()) * 1000
+                            if focus_success:
+                                # this condition happens if we concluded we had to dead-reckon due to bad input data
+                                break
 
                             # if the focus step took us out of a narrow range, or if our prediction was off,
                             # guess that we really messed up and try again.
                             # note: the origin of this is that sometimes the focus will latch onto a top mark or the texture
                             # of the silicon backside if there's a lack of interesting features to look at.
-                            if abs(before_z - self.total_z_mm()) > FOCUS_INCREMENTAL_RANGE_UM / 1000.0 or \
+                            if was_dead_reckon:
+                                # if we were dead reckoning, be a little more forgiving on the limit
+                                limit = FOCUS_INCREMENTAL_RANGE_UM * 1.5 / 1000.0
+                            else:
+                                limit = FOCUS_INCREMENTAL_RANGE_UM / 1000.0
+                            if abs(before_z - self.total_z_mm()) > limit or \
                                 self.focus_ratio <= FOCUS_RATIO_LIMIT:
                                 if self.focus_ratio <= FOCUS_RATIO_LIMIT:
                                     logging.warning(f"Focus ratio out of range: {self.focus_ratio:0.3f} < {FOCUS_RATIO_LIMIT}")
@@ -572,25 +636,19 @@ class Iris():
                                 self.jubilee.set_axis('z', before_z_machine)
                                 self.piezo.set_code(before_z_piezo)
                                 focus_success = False
-                                focus_iters += 1
                                 # pick a different spot to focus every time after the first basic retry
-                                if focus_iters == 2:
-                                    self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_TOP))
-                                elif focus_iters == 3:
-                                    self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_TOP))
-                                elif focus_iters == 4:
-                                    self.image_name.set_focus_area((ImageNamer.FOCUS_LEFT, ImageNamer.FOCUS_CENTER))
-                                elif focus_iters == 5:
-                                    self.image_name.set_focus_area((ImageNamer.FOCUS_RIGHT, ImageNamer.FOCUS_CENTER))
-                                elif focus_iters == 6:
-                                    self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_BOTTOM))
+                                if len(alt_focus_list) > 0:
+                                    self.image_name.set_focus_area(alt_focus_list.pop())
+                                    time.sleep(0.3) # give some time for images to accumulate
                                 else:
-                                    self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_CENTER))
-                                if focus_iters > 7:
-                                    logging.warning("Focus failed to converge, keeping previous Z-height.")
+                                    logging.warning("Focus failed to converge, dead-reckoning to interpolated Z.")
+                                    self.smart_set_z_mm(zp) # dead-reckon to interpolated
+                                    self.wait_for_machine_settling()
+                                    was_dead_reckon = True
                                     break
                             else:
                                 focus_success = True
+                                was_dead_reckon = False
 
                     logging.info(f"Predicted metric: {self.predicted_metric}, actual metric: {self.final_score}, ratio: {self.focus_ratio:0.3f}")
                     # setup the image_name object
@@ -679,6 +737,7 @@ class Iris():
 
             expo_time_s = self.focus_df.loc[self.focus_df['time'].idxmax()]['expo_t'] / 1000
             self.focus_sample_duration_s = FOCUS_PIEZO_SETTLING_S + FOCUS_MIN_SAMPLES * expo_time_s
+            self.histo_ratio = self.focus_df.loc[self.focus_df['time'].idxmax()]['histo']
         elif self.focus_state == "FIND_SLOPE":
             # safety check
             if self.total_z_mm() > self.absolute_starting_z_mm + FOCUS_MAX_EXCURSION_MM or \
@@ -839,12 +898,12 @@ class Iris():
 
     def fetch_focus_events(self):
         while not self.focus_queue.empty():
-            (timestamp, focus_metric, expo_gain, expo_time) = self.focus_queue.get()
+            (timestamp, focus_metric, expo_gain, expo_time, histo) = self.focus_queue.get()
             if self.jubilee.z == None:
                 z_checked = 10.0
             else:
                 z_checked = self.jubilee.z
-            self.focus_df.loc["last"] = [timestamp, focus_metric, self.focus_state, self.piezo.code, z_checked, "unchecked", expo_gain, expo_time]
+            self.focus_df.loc["last"] = [timestamp, focus_metric, self.focus_state, self.piezo.code, z_checked, "unchecked", expo_gain, expo_time, histo]
             self.focus_df = self.focus_df.reset_index(drop=True)
             if len(self.focus_df) > FOCUS_MAX_HISTORY:
                 # cull some history to prevent storage problems

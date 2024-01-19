@@ -34,7 +34,7 @@ DEFAULT_FILTER_20X = 21
 DEFAULT_LAPLACIAN = None
 DEFAULT_FILTER = None
 
-DEFAULT_HISTO_CUTOFF = 160
+DEFAULT_HISTO_CUTOFF = 133
 
 FOCUS_AREA_PX = 1536
 GRAPH_WINDOW = 50
@@ -278,7 +278,7 @@ class MainWindow(QMainWindow):
             f"{min_y:0.4f}",
             (int(offset), int(h-offset)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1.5,
+            1.2,
             (128, 128, 128),
             bottomLeftOrigin = False,
             thickness=2,
@@ -288,14 +288,14 @@ class MainWindow(QMainWindow):
             f"{max_y:0.4f}",
             (int(offset), int(offset*2)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1.5,
+            1.2,
             (128, 128, 128),
             bottomLeftOrigin = False,
             thickness=2,
         )
         return canvas
 
-    def draw_hist(self, hist, w=530, h=500):
+    def draw_hist(self, hist, ratio, w=530, h=500):
         canvas = np.full((h, w, 3), 255, dtype=np.uint8)
         # add some border
         w_buf = (w - 512) // 2
@@ -321,6 +321,16 @@ class MainWindow(QMainWindow):
             (bin_w * int(self.histo_cutoff.value()) + w_buf, h_full),
             (180, 40, 60),
             thickness=1
+        )
+        cv2.putText(
+            canvas,
+            f"{ratio:0.1f}%",
+            (10, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2,
+            (128, 128, 128),
+            bottomLeftOrigin = False,
+            thickness=2,
         )
         return canvas
 
@@ -536,7 +546,10 @@ class MainWindow(QMainWindow):
 
             # extract a histogram
             hist = cv2.calcHist([cv2_image], [0], None, [256], (0, 256), accumulate=False)
-            hist_bitmap = self.draw_hist(hist)
+            lower_sum = hist[:self.histo_cutoff.value()].sum()
+            upper_sum = hist[self.histo_cutoff.value():].sum()
+            ratio = (lower_sum / (lower_sum + upper_sum)) * 100.0
+            hist_bitmap = self.draw_hist(hist, ratio)
             self.histo.setPixmap(QPixmap.fromImage(
                 QImage(hist_bitmap, hist_bitmap.shape[1], hist_bitmap.shape[0], hist_bitmap.shape[1] * 3, QImage.Format_RGB888)
             ))
@@ -557,7 +570,7 @@ class MainWindow(QMainWindow):
                 score = abs(laplacian.var())
                 self.focus_scores.append(score)
                 if not self.focus_queue.full():
-                    self.focus_queue.put((datetime.now(), score, self.spinbox_expoGain.value(), self.spinbox_expoTime.value()), block=False)
+                    self.focus_queue.put((datetime.now(), score, self.spinbox_expoGain.value(), self.spinbox_expoTime.value(), ratio), block=False)
                 self.focus_variance.setText(f"{statistics.stdev(list(self.focus_scores)):0.2f}")
             except ValueError:
                 logging.debug("Laplacian had 0 variance, inserting bogus value for focus")

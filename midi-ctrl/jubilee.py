@@ -9,12 +9,20 @@ CONTROL_MIN_ROTATION_ANGLE = -80.0 # somewhat not exactly degrees somehow...
 CONTROL_MAX_ROTATION_ANGLE = 80.0
 MIN_JUBILEE_STEP_MM = 0.03 # must be big enough to encompass a focus sweep!
 
-class Poi:
+class Poi():
     def __init__(self, x, y, z, piezo):
         self.x = x
         self.y = y
         self.z = z
         self.piezo = piezo
+
+    def __json_default__(self):
+        return {
+            'x': self.x,
+            'y': self.y,
+            'z': self.z,
+            'piezo': self.piezo
+        }
 
 class Jubilee:
     def __init__(self, port):
