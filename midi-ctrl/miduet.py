@@ -1164,6 +1164,7 @@ class Iris():
                 # update the UI thread
                 poi = self.current_pos_as_poi()
                 self.jubilee_state.put(poi, block=False)
+                self.set_image_name(rep=0)
 
 def set_controls(midi_in):
     # Control schema layout
