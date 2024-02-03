@@ -273,7 +273,7 @@ class Iris():
         # all args except for args is shared state with other threads
         args, jubilee, midi, light, piezo, gamma, image_name,
         auto_snap_done, auto_snap_event, schema,
-        focus_queue, jubilee_state, fine_focus_event
+        focus_queue, jubilee_state, fine_focus_event, piezo_cal_event
     ):
         if args.mag == 5:
             stepsize = 0.5
@@ -299,6 +299,7 @@ class Iris():
         self.focus_queue = focus_queue
         self.jubilee_state = jubilee_state
         self.fine_focus_event = fine_focus_event
+        self.piezo_cal_event = piezo_cal_event
         self.focus_automation = False
 
         # only setup the focus_df as the shared value between the main loop and the focus routine
@@ -949,12 +950,46 @@ class Iris():
 
         profiling = False
         was_running_focus = False
+        piezo_cal_state = 'IDLE'
+        piezo_cal_results = []
+        piezo_cal_offsets = [0, 10, 20, 30, 20, 10, 0, -10, -20, -30, -20, -10, 0]
+        piezo_cal_index = 0
+        piezo_base_z_mm = None
         while True:
             if profiling:
                 start = datetime.datetime.now()
             if cam_quit.is_set():
                 self.all_leds_off()
                 return
+
+            if self.piezo_cal_event.is_set():
+                if piezo_cal_state == 'IDLE':
+                    piezo_cal_index = 0
+                    self.set_mid_z()
+                    piezo_cal_state = 'FIRST_FOCUS'
+                    self.fine_focus_event.set()
+                elif piezo_cal_state == 'FIRST_FOCUS':
+                    pass
+                elif piezo_cal_state == 'WAIT_FOCUS':
+                    pass
+                elif piezo_cal_state == 'FIRST_FOCUS_DONE':
+                    # special case because we want to remember our "base" z
+                    piezo_base_z_mm = self.jubilee.z
+                    piezo_cal_results += [(piezo_cal_offsets[piezo_cal_index], self.jubilee.z, self.piezo.code)]
+                    piezo_cal_index += 1
+                    self.jubilee.set_axis('z', piezo_base_z_mm + piezo_cal_offsets[piezo_cal_index] / 1000)
+                    piezo_cal_state = 'WAIT_FOCUS'
+                    self.fine_focus_event.set()
+                elif piezo_cal_state == 'FOCUS_DONE':
+                    piezo_cal_results += [(piezo_cal_offsets[piezo_cal_index], self.jubilee.z, self.piezo.code)]
+                    piezo_cal_index += 1
+                    if piezo_cal_index < len(piezo_cal_offsets):
+                        self.jubilee.set_axis('z', piezo_base_z_mm + piezo_cal_offsets[piezo_cal_index] / 1000)
+                        piezo_cal_state = 'WAIT_FOCUS'
+                        self.fine_focus_event.set()
+                    else:
+                        self.piezo_cal_event.clear()
+                        piezo_cal_state = 'IDLE'
 
             # Drain the focus queue, run focus if requested
             # Note to self: variance of a static image is <5. Table vibration > 300 deviation. Focus changes ~100 deviation.
@@ -967,6 +1002,10 @@ class Iris():
                     self.wait_for_machine_settling()
                     self.focus_ratio = self.final_score / self.predicted_metric
                     logging.info(f"Predicted metric: {self.predicted_metric}, actual metric: {self.final_score}, ratio: {self.focus_ratio:0.3f}")
+                    if piezo_cal_state == 'WAIT_FOCUS':
+                        piezo_cal_state = 'FOCUS_DONE'
+                    elif piezo_cal_state == 'FIRST_FOCUS':
+                        piezo_cal_state = 'FIRST_FOCUS_DONE'
                 was_running_focus = False
 
             # Hardware control loop
@@ -1291,13 +1330,15 @@ def main():
     auto_snap_event = Event()
     auto_snap_done = Event()
     fine_focus_event = Event()
+    piezo_cal_event = Event()
     focus_score = queue.Queue(maxsize=5)
     jubilee_state = queue.Queue()
     if not args.no_cam:
         c = Thread(target=cam, args=[
             cam_quit, gamma, image_name,
             auto_snap_event, auto_snap_done,
-            focus_score, args.mag, jubilee_state, fine_focus_event])
+            focus_score, args.mag, jubilee_state,
+            fine_focus_event, piezo_cal_event])
         c.start()
 
     numeric_level = getattr(logging, args.loglevel.upper(), None)
@@ -1391,7 +1432,8 @@ def main():
                     iris = Iris(
                         args, j, m, l, p, gamma, image_name,
                         auto_snap_done, auto_snap_event, schema,
-                        focus_score, jubilee_state, fine_focus_event
+                        focus_score, jubilee_state, fine_focus_event,
+                        piezo_cal_event
                     )
 
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
