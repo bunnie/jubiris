@@ -82,7 +82,7 @@ MAX_GAMMA = 2.0
 # 11. Make sure we're focused.
 # 12. Start the stitching run.
 
-FOCUS_VARIANCE_THRESH = 11.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
+FOCUS_VARIANCE_THRESH = 30.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
 FOCUS_MAX_HISTORY = 2000
 FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
@@ -977,6 +977,7 @@ class Iris():
                     piezo_base_z_mm = self.jubilee.z
                     piezo_cal_results += [(piezo_cal_offsets[piezo_cal_index], self.jubilee.z, self.piezo.code)]
                     piezo_cal_index += 1
+                    logging.info(f"Calibrating index: {piezo_base_z_mm + piezo_cal_offsets[piezo_cal_index] / 1000:0.2f}")
                     self.jubilee.set_axis('z', piezo_base_z_mm + piezo_cal_offsets[piezo_cal_index] / 1000)
                     piezo_cal_state = 'WAIT_FOCUS'
                     self.fine_focus_event.set()
@@ -989,6 +990,10 @@ class Iris():
                         self.fine_focus_event.set()
                     else:
                         self.piezo_cal_event.clear()
+                        logging.info("Calibration done")
+                        logging.info(f"{piezo_cal_results}")
+                        with open("piezo_cal.json", "w") as cal_f:
+                            cal_f.write(json.dumps(piezo_cal_results, indent=2))
                         piezo_cal_state = 'IDLE'
 
             # Drain the focus queue, run focus if requested

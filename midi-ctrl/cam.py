@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
         button_cluster = QVBoxLayout()
         button_cluster.addWidget(self.btn_fine_focus)
         button_cluster.addWidget(self.btn_snap)
+        button_cluster.addWidget(self.btn_piezo_cal)
         button_cluster.addWidget(self.btn_quit)
 
         # autofocus image processing
