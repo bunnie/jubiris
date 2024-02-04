@@ -32,6 +32,7 @@ import time
 import pprint
 import logging
 import re
+from pathlib import Path
 
 from cam import cam
 from threading import Thread, Event
@@ -82,7 +83,7 @@ MAX_GAMMA = 2.0
 # 11. Make sure we're focused.
 # 12. Start the stitching run.
 
-FOCUS_VARIANCE_THRESH = 30.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
+FOCUS_VARIANCE_THRESH = 11.0 # 1-sigma acceptable deviation for focus data. This value strongly depends on the laplacian & filtering.
 FOCUS_MAX_HISTORY = 2000
 FOCUS_SLOPE_SEARCH_STEPS = 1 # causes it to re-analyze every step
 FOCUS_STEP_UM = 5.0 # piezo step in microns during focus searching
@@ -952,7 +953,10 @@ class Iris():
         was_running_focus = False
         piezo_cal_state = 'IDLE'
         piezo_cal_results = []
-        piezo_cal_offsets = [0, 10, 20, 30, 20, 10, 0, -10, -20, -30, -20, -10, 0]
+        piezo_cal_offsets = [0, -10, 0, -10, 0, -10, 0, -10, 0, -10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10,
+                             20, 30, 20, 30, 20, 30, 20, 30, 40, 30, 40, 30, 40, 30, 40, 30, 20, 10, 0,
+                             -10, -20, -30, -20, -30, -20, -30, -20, -30, -40, -30, -40, -30, -40, -30, -40,
+                             -30, -20, -10, 0]
         piezo_cal_index = 0
         piezo_base_z_mm = None
         while True:
@@ -1327,6 +1331,9 @@ def main():
         "--auto-quit", action="store_true", help="Automatically quit after automation runs"
     )
     args = parser.parse_args()
+
+    dir = Path(args.name)
+    dir.mkdir(parents=True, exist_ok=True)
 
     gamma = Gamma()
     image_name = ImageNamer()
