@@ -1,6 +1,6 @@
 # Jubiris
 
-IRIS customizations for Jubilee
+IRIS customizations for Jubilee: read more at [this blog post](https://www.bunniestudios.com/blog/2024/control-and-autofocus-software-for-chip-level-microscopy/).
 
 Top level file for controlling IRIS can be found at [miduet.py](./midi-ctrl/miduet.py).
 
