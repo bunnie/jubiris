@@ -4,7 +4,7 @@ import serial
 PIEZO_UM_PER_VOLT = 1.17 # estimated
 PIEZO_MAX_VOLT = 103.97
 PIEZO_MAX_CODE = 16383 # max scale overall
-PIEZO_UM_PER_LSB = (1 / 193.5) # 0.007425
+PIEZO_UM_PER_LSB = 0.007425 # (1 / 193.5) # 0.007425
 MAX_PIEZO = 16383 # max scale for slider (set to 8192 for 20x objective)
 
 class Piezo:
