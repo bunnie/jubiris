@@ -95,9 +95,9 @@ FOCUS_STEPS_MARGIN = 2 # minimum number of steps required to define one side of 
 AUTOFOCUS_SAFETY_MARGIN_MM = 0.1 # max bounds on autofocus deviation from scanned range
 FOCUS_SETTLING_WINDOW_S = 1.0 # maximum window of data to consider if the machine has settled
 FOCUS_SETTLING_MIN_SAMPLES = 5 # no meaningful settling metric with fewer than this number of samples
-FOCUS_INCREMENTAL_RANGE_UM = 12
-FOCUS_ABSOLUTE_RANGE_UM = 25 # total deviation allowable from the projected Z-plane
-FOCUS_RSQUARE_LIMIT = 0.03 # multiply by mean of focus metric to get max error on fit (think of as %age of metric for fit)
+FOCUS_INCREMENTAL_RANGE_UM = 12 # 200 loose
+FOCUS_ABSOLUTE_RANGE_UM = 25 # 200 loose # total deviation allowable from the projected Z-plane
+FOCUS_RSQUARE_LIMIT = 0.03 # 0.05 loose # multiply by mean of focus metric to get max error on fit (think of as %age of metric for fit)
 FOCUS_RATIO_LIMIT = 0.995 # minimum ratio of actual vs predicted focus metric
 FOCUS_HISTO_LIMIT = 85.0 # percentage of image that should be within histogram limits
 
@@ -139,8 +139,8 @@ class ImageNamer:
         self.quit = False # flag to indicate if we're exiting
         self.dummy = False
         self.focus_area = (0, 0) # (x, y) tuple encoding focus area snapping
-        self.w = 3840 # expected image total width
-        self.h = 2160 # expected image total height
+        self.w = 3536 # expected image total width
+        self.h = 3536 # expected image total height
         self.f = 0 # polynomial fit
         self.s = 0 # focus score metric
         self.v = 0 # predicted vs actual ratio
@@ -279,7 +279,7 @@ class Iris():
         if args.mag == 5:
             stepsize = 0.5
         elif args.mag == 10:
-            stepsize = 0.3
+            stepsize = 0.5
         elif args.mag == 20:
             stepsize = 0.1
         else:
@@ -1365,6 +1365,7 @@ def main():
     mot1_port = None
     jubilee_port = None
     for port, _desc, hwid in possible_ports:
+        logging.debug(f"Serial hwid {hwid}")
         if SERIAL_NO_LED in hwid:
             led_port = port
         elif SERIAL_NO_PIEZO in hwid:
