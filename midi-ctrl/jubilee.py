@@ -148,7 +148,7 @@ class Jubilee:
     # takes our self.x/y/z and sends it to the machine. Also handles any global axis swapping
     def sync_to_mach(self):
         # NOTE axis swap is implemented at sync_to_mach
-        return self.send_cmd(f'G1 Y{self.x:0.2f} X{self.y:0.2f} Z{self.z:0.2f}')
+        return self.send_cmd(f'G1 Y{-self.x:0.2f} X{-self.y:0.2f} Z{self.z:0.2f}')
 
     def reset(self):
         return self.send_cmd('M999')
