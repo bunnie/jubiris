@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self.focus_queue = None # this must be initialized to a Queue for image queuing code to run
         self.fine_focus_event = None
         self.piezo_cal_event = None
+        self.planarize_event = None
         self.jubilee_state = None # This is a Queue that contains Poi records
         self.oneshot_expo_print = False
         self.focus_scores = deque([0] * GRAPH_WINDOW, maxlen=GRAPH_WINDOW)
@@ -119,12 +120,15 @@ class MainWindow(QMainWindow):
         self.btn_snap.clicked.connect(self.onBtnSnap)
         self.btn_piezo_cal = QPushButton("Piezo Cal")
         self.btn_piezo_cal.clicked.connect(self.onPiezoCal)
+        self.btn_planarize = QPushButton("Planarize")
+        self.btn_planarize.clicked.connect(self.onPlanarize)
         self.btn_quit = QPushButton("Quit")
         self.btn_quit.clicked.connect(self.onBtnQuit)
         button_cluster = QVBoxLayout()
         button_cluster.addWidget(self.btn_fine_focus)
         button_cluster.addWidget(self.btn_snap)
         button_cluster.addWidget(self.btn_piezo_cal)
+        button_cluster.addWidget(self.btn_planarize)
         button_cluster.addWidget(self.btn_quit)
 
         # autofocus image processing
@@ -245,6 +249,8 @@ class MainWindow(QMainWindow):
         self.fine_focus_event.set()
     def onPiezoCal(self):
         self.piezo_cal_event.set()
+    def onPlanarize(self):
+        self.planarize_event.set()
 
     def draw_graph(self, data, w=500, h=500):
         MARGIN = 0.1
@@ -736,7 +742,7 @@ def snapper(w, auto_snap_event, auto_snap_done):
 
 def cam(cam_quit, gamma, image_name,
         auto_snap_event, auto_snap_done,
-        focus_queue, mag, jubilee_state, fine_focus_event, piezo_cal_event):
+        focus_queue, mag, jubilee_state, fine_focus_event, piezo_cal_event, planarize_event):
     app = QApplication(sys.argv)
     w = MainWindow(mag)
     w.image_name = image_name
@@ -750,6 +756,7 @@ def cam(cam_quit, gamma, image_name,
     w.jubilee_state = jubilee_state
     w.fine_focus_event = fine_focus_event
     w.piezo_cal_event = piezo_cal_event
+    w.planarize_event = planarize_event
 
     # Run a thread to forward/manage snapshotting events
     b = Thread(target=snapper, args=[w, auto_snap_event, auto_snap_done])
