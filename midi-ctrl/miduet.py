@@ -274,7 +274,7 @@ class Iris():
         # all args except for args is shared state with other threads
         args, jubilee, midi, light, piezo, gamma, image_name,
         auto_snap_done, auto_snap_event, schema,
-        focus_queue, jubilee_state, fine_focus_event, piezo_cal_event
+        focus_queue, jubilee_state, fine_focus_event, piezo_cal_event, planarize_event
     ):
         if args.mag == 5:
             stepsize = 0.5
@@ -301,6 +301,7 @@ class Iris():
         self.jubilee_state = jubilee_state
         self.fine_focus_event = fine_focus_event
         self.piezo_cal_event = piezo_cal_event
+        self.planarize_event = planarize_event
         self.focus_automation = False
 
         # only setup the focus_df as the shared value between the main loop and the focus routine
@@ -959,6 +960,8 @@ class Iris():
                              -30, -20, -10, 0]
         piezo_cal_index = 0
         piezo_base_z_mm = None
+        planarize_state = 'IDLE'
+        planarize_step = 0
         while True:
             if profiling:
                 start = datetime.datetime.now()
@@ -1000,12 +1003,121 @@ class Iris():
                             cal_f.write(json.dumps(piezo_cal_results, indent=2))
                         piezo_cal_state = 'IDLE'
 
+            if self.planarize_event.is_set():
+                if planarize_state == 'IDLE':
+                    if self.jubilee.poi[0] is None or self.jubilee.poi[1] is None:
+                        logging.warning("POIs have not been set, can't planarize!")
+                        planarize_state = 'DONE'
+                    else:
+                        if self.jubilee.poi[2] is None:
+                            # simplify edge cases by just duplicating to create our third POI
+                            self.jubilee.poi[2] = self.jubilee.poi[1]
+
+                        # derive Z-plane equation
+                        p = []
+                        for i in range(3):
+                            p += [np.array((self.jubilee.poi[i].x, self.jubilee.poi[i].y,
+                                            total_z_mm_from_parts(self.jubilee.poi[i].z, self.jubilee.poi[i].piezo)))]
+
+                        if np.array_equal(p[1], p[2]):
+                            p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+                            p[2][1] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+
+                        v1 = p[1] - p[0]
+                        v2 = p[2] - p[0]
+                        normal_vector = np.cross(v1, v2)
+                        a, b, c = normal_vector
+                        d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
+                        if c == 0:
+                            logging.error(f"Plane equation has a poorly formed solution! {a}, {b}, {c}, {d}")
+                            planarize_state = 'DONE'
+
+                        # output some params for debugging later on
+                        debug_fname = self.image_name.name + '/' + 'debug.json'
+                        debug = {
+                            'poi0' : self.jubilee.poi[0],
+                            'poi1' : self.jubilee.poi[1],
+                            'poi2' : self.jubilee.poi[2],
+                            'plane' : [a, b, c, d],
+                        }
+                        with open(debug_fname, 'w') as debugf:
+                            json.dump(debug, debugf, indent=2, cls=CustomEncoder)
+
+                        # plan the path of steps
+                        min_x = min([i.x for i in self.jubilee.poi])
+                        max_x = max([i.x for i in self.jubilee.poi])
+                        min_y = min([i.y for i in self.jubilee.poi])
+                        max_y = max([i.y for i in self.jubilee.poi])
+
+                        # find the first dimension that is not identical and use that as our line
+                        if min_x != max_x:
+                            x_path_ = [min(self.jubilee.poi, key=lambda p: p.x).x, max(self.jubilee.poi, key=lambda p: p.x).x]
+                            x_path = [x_path_[0], (x_path_[0] + x_path_[1]) / 2, x_path_[1]]
+                            y_path = [min_y, min_y, min_y]
+                            z_path_ = [min(self.jubilee.poi, key=lambda p: p.x).z, max(self.jubilee.poi, key=lambda p: p.x).z]
+                            piezo_path_ = [min(self.jubilee.poi, key=lambda p: p.x).piezo, max(self.jubilee.poi, key=lambda p: p.x).piezo]
+                        else:
+                            assert min_y != max_y, "POI not distinct enough to plan a path"
+                            x_path = [min_x, min_x, min_x]
+                            y_path_ = [min(self.jubilee.poi, key=lambda p: p.y).y, max(self.jubilee.poi, key=lambda p: p.y).y]
+                            y_path = [y_path_[0], (y_path_[0] + y_path_[1]) / 2, y_path_[1]]
+                            z_path_ = [min(self.jubilee.poi, key=lambda p: p.y).z, max(self.jubilee.poi, key=lambda p: p.y).z]
+                            piezo_path_ = [min(self.jubilee.poi, key=lambda p: p.y).piezo, max(self.jubilee.poi, key=lambda p: p.y).piezo]
+
+                        tz_path_ = [total_z_mm_from_parts(z_path_[0], piezo_path_[0]), total_z_mm_from_parts(z_path_[1], piezo_path_[1])]
+                        tz_path = [tz_path_[0], (tz_path_[0] + tz_path_[1]) / 2, tz_path_[1]]
+
+                        self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_CENTER))
+                        az_path = [0] * 3  # actual Z
+                        cz_path = [0] * 3  # computed Z
+                        planarize_state = 'RUN'
+                        planarize_step = 0
+                elif planarize_state == 'RUN':
+                        if not self.fine_focus_event.is_set():
+                            if planarize_step > 0:
+                                # record the result from prior run
+                                az_path[planarize_step - 1] = total_z_mm_from_parts(self.jubilee.z, self.piezo.code)
+
+                            if planarize_step == 3:
+                                planarize_state = 'DONE'
+                            else:
+                                self.fine_focus_event.set()
+                                x = x_path[planarize_step]
+                                y = y_path[planarize_step]
+
+                                # Dead-reckon to a focus point based on solving the plane equation of the points of interest.
+                                zp = -(a * x + b * y + d) / c
+                                cz_path[planarize_step] = zp
+                                # Compute Z partition
+                                (z, p_lsb) = self.partition_z_mm(zp)
+                                logging.info(f"Step to {x}, {y}, {zp} ({z} + {p_lsb})")
+                                self.jubilee.goto((x, y, z))
+                                self.piezo.set_code(p_lsb)
+                        else:
+                            # wait for focus to run, when it finishes running, fine_focus_event will be
+                            # cleared, and planarize_step is incremented
+                            pass
+                elif planarize_state == 'DONE':
+                    print("Results:")
+                    for step in range(3):
+                        print(f"{step}: {x_path[step]}, {y_path[step]}, {az_path[step]}, {cz_path[step]}")
+                    planarize_state = 'DONE'
+
+                    self.planarize_event.clear()
+                    self.jubilee.poi = [None] * len(self.jubilee.poi)
+                    planarize_state = 'IDLE'
+
             # Drain the focus queue, run focus if requested
             # Note to self: variance of a static image is <5. Table vibration > 300 deviation. Focus changes ~100 deviation.
             self.fetch_focus_events()
             if self.fine_focus_event.is_set():
                 self.fine_focus()
                 was_running_focus = True
+
+                # check if focus just finished; if it did, increment our planarization state
+                if not self.fine_focus_event.is_set() and self.planarize_event.is_set():
+                    planarize_step += 1
+
             else:
                 if was_running_focus:
                     self.wait_for_machine_settling()
@@ -1343,6 +1455,7 @@ def main():
     auto_snap_done = Event()
     fine_focus_event = Event()
     piezo_cal_event = Event()
+    planarize_event = Event()
     focus_score = queue.Queue(maxsize=5)
     jubilee_state = queue.Queue()
     if not args.no_cam:
@@ -1350,7 +1463,7 @@ def main():
             cam_quit, gamma, image_name,
             auto_snap_event, auto_snap_done,
             focus_score, args.mag, jubilee_state,
-            fine_focus_event, piezo_cal_event])
+            fine_focus_event, piezo_cal_event, planarize_event])
         c.start()
 
     numeric_level = getattr(logging, args.loglevel.upper(), None)
@@ -1446,7 +1559,7 @@ def main():
                         args, j, m, l, p, gamma, image_name,
                         auto_snap_done, auto_snap_event, schema,
                         focus_score, jubilee_state, fine_focus_event,
-                        piezo_cal_event
+                        piezo_cal_event, planarize_event
                     )
 
                     q = Thread(target=quitter, args=[jubilee, light, piezo, cam_quit])
