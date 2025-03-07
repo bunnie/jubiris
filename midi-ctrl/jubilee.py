@@ -97,7 +97,7 @@ class Jubilee:
         updated = False
         if not self.is_on():
             return False # don't return an error, just silently fail
-        if (axis == 'x' or axis == 'y') and abs(value) > 30.0: # outside a reasonable request
+        if (axis == 'x' or axis == 'y') and abs(value) > 100.0: # outside a reasonable request
             return False
         if axis == 'z' and (value < 8.0 or value > 15.0): # bind this tightly to a zone around 10.0, which is the default starting value
             logging.warning("Requested Z on set_axis() is outside of a conservatively bound range.\nIf the machine is definitely safe, re-zero the motors and try again.")
