@@ -11,7 +11,7 @@ MIN_JUBILEE_STEP_MM = 0.03 # must be big enough to encompass a focus sweep!
 
 SAFETY_XY = 40.0
 SAFETY_ZMIN = 8.0
-SAFETY_ZMAX = 15.0
+SAFETY_ZMAX = 40.0
 
 class Poi():
     def __init__(self, x, y, z, piezo):
