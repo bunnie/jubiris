@@ -1020,73 +1020,116 @@ class Iris():
 
             if self.planarize_event.is_set():
                 if planarize_state == 'IDLE':
-                    if self.jubilee.poi[0] is None or self.jubilee.poi[1] is None:
-                        logging.warning("POIs have not been set, can't planarize!")
-                        planarize_state = 'DONE'
-                    else:
-                        if self.jubilee.poi[2] is None:
-                            # simplify edge cases by just duplicating to create our third POI
-                            self.jubilee.poi[2] = self.jubilee.poi[1]
-
-                        # derive Z-plane equation
-                        p = []
-                        for i in range(3):
-                            p += [np.array((self.jubilee.poi[i].x, self.jubilee.poi[i].y,
-                                            total_z_mm_from_parts(self.jubilee.poi[i].z, self.jubilee.poi[i].piezo)))]
-
-                        if np.array_equal(p[1], p[2]):
-                            p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
-                            p[2][1] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
-
-                        v1 = p[1] - p[0]
-                        v2 = p[2] - p[0]
-                        normal_vector = np.cross(v1, v2)
-                        a, b, c = normal_vector
-                        d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
-                        if c == 0:
-                            logging.error(f"Plane equation has a poorly formed solution! {a}, {b}, {c}, {d}")
+                    if False:
+                        if self.jubilee.poi[0] is None or self.jubilee.poi[1] is None:
+                            logging.warning("POIs have not been set, can't planarize!")
                             planarize_state = 'DONE'
-
-                        # output some params for debugging later on
-                        debug_fname = self.image_name.name + '/' + 'debug.json'
-                        debug = {
-                            'poi0' : self.jubilee.poi[0],
-                            'poi1' : self.jubilee.poi[1],
-                            'poi2' : self.jubilee.poi[2],
-                            'plane' : [a, b, c, d],
-                        }
-                        with open(debug_fname, 'w') as debugf:
-                            json.dump(debug, debugf, indent=2, cls=CustomEncoder)
-
-                        # plan the path of steps
-                        min_x = min([i.x for i in self.jubilee.poi])
-                        max_x = max([i.x for i in self.jubilee.poi])
-                        min_y = min([i.y for i in self.jubilee.poi])
-                        max_y = max([i.y for i in self.jubilee.poi])
-
-                        # find the first dimension that is not identical and use that as our line
-                        if min_x != max_x:
-                            x_path_ = [min(self.jubilee.poi, key=lambda p: p.x).x, max(self.jubilee.poi, key=lambda p: p.x).x]
-                            x_path = [x_path_[0], (x_path_[0] + x_path_[1]) / 2, x_path_[1]]
-                            y_path = [min_y, min_y, min_y]
-                            z_path_ = [min(self.jubilee.poi, key=lambda p: p.x).z, max(self.jubilee.poi, key=lambda p: p.x).z]
-                            piezo_path_ = [min(self.jubilee.poi, key=lambda p: p.x).piezo, max(self.jubilee.poi, key=lambda p: p.x).piezo]
                         else:
-                            assert min_y != max_y, "POI not distinct enough to plan a path"
-                            x_path = [min_x, min_x, min_x]
-                            y_path_ = [min(self.jubilee.poi, key=lambda p: p.y).y, max(self.jubilee.poi, key=lambda p: p.y).y]
-                            y_path = [y_path_[0], (y_path_[0] + y_path_[1]) / 2, y_path_[1]]
-                            z_path_ = [min(self.jubilee.poi, key=lambda p: p.y).z, max(self.jubilee.poi, key=lambda p: p.y).z]
-                            piezo_path_ = [min(self.jubilee.poi, key=lambda p: p.y).piezo, max(self.jubilee.poi, key=lambda p: p.y).piezo]
+                            if self.jubilee.poi[2] is None:
+                                # simplify edge cases by just duplicating to create our third POI
+                                self.jubilee.poi[2] = self.jubilee.poi[1]
 
-                        tz_path_ = [total_z_mm_from_parts(z_path_[0], piezo_path_[0]), total_z_mm_from_parts(z_path_[1], piezo_path_[1])]
-                        tz_path = [tz_path_[0], (tz_path_[0] + tz_path_[1]) / 2, tz_path_[1]]
+                            # derive Z-plane equation
+                            p = []
+                            for i in range(3):
+                                p += [np.array((self.jubilee.poi[i].x, self.jubilee.poi[i].y,
+                                                total_z_mm_from_parts(self.jubilee.poi[i].z, self.jubilee.poi[i].piezo)))]
 
-                        self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_CENTER))
-                        az_path = [0] * 3  # actual Z
-                        cz_path = [0] * 3  # computed Z
-                        planarize_state = 'RUN'
-                        planarize_step = 0
+                            if np.array_equal(p[1], p[2]):
+                                p[2][0] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+                                p[2][1] += 0.001 # perturb the second point slightly to make the equations solvable in case only two POI set
+
+                            v1 = p[1] - p[0]
+                            v2 = p[2] - p[0]
+                            normal_vector = np.cross(v1, v2)
+                            a, b, c = normal_vector
+                            d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
+                            if c == 0:
+                                logging.error(f"Plane equation has a poorly formed solution! {a}, {b}, {c}, {d}")
+                                planarize_state = 'DONE'
+
+                            # output some params for debugging later on
+                            debug_fname = self.image_name.name + '/' + 'debug.json'
+                            debug = {
+                                'poi0' : self.jubilee.poi[0],
+                                'poi1' : self.jubilee.poi[1],
+                                'poi2' : self.jubilee.poi[2],
+                                'plane' : [a, b, c, d],
+                            }
+                            with open(debug_fname, 'w') as debugf:
+                                json.dump(debug, debugf, indent=2, cls=CustomEncoder)
+
+                            # plan the path of steps
+                            min_x = min([i.x for i in self.jubilee.poi])
+                            max_x = max([i.x for i in self.jubilee.poi])
+                            min_y = min([i.y for i in self.jubilee.poi])
+                            max_y = max([i.y for i in self.jubilee.poi])
+
+                            # find the first dimension that is not identical and use that as our line
+                            if min_x != max_x:
+                                x_path_ = [min(self.jubilee.poi, key=lambda p: p.x).x, max(self.jubilee.poi, key=lambda p: p.x).x]
+                                x_path = [x_path_[0], (x_path_[0] + x_path_[1]) / 2, x_path_[1]]
+                                y_path = [min_y, min_y, min_y]
+                                z_path_ = [min(self.jubilee.poi, key=lambda p: p.x).z, max(self.jubilee.poi, key=lambda p: p.x).z]
+                                piezo_path_ = [min(self.jubilee.poi, key=lambda p: p.x).piezo, max(self.jubilee.poi, key=lambda p: p.x).piezo]
+                            else:
+                                assert min_y != max_y, "POI not distinct enough to plan a path"
+                                x_path = [min_x, min_x, min_x]
+                                y_path_ = [min(self.jubilee.poi, key=lambda p: p.y).y, max(self.jubilee.poi, key=lambda p: p.y).y]
+                                y_path = [y_path_[0], (y_path_[0] + y_path_[1]) / 2, y_path_[1]]
+                                z_path_ = [min(self.jubilee.poi, key=lambda p: p.y).z, max(self.jubilee.poi, key=lambda p: p.y).z]
+                                piezo_path_ = [min(self.jubilee.poi, key=lambda p: p.y).piezo, max(self.jubilee.poi, key=lambda p: p.y).piezo]
+
+                            tz_path_ = [total_z_mm_from_parts(z_path_[0], piezo_path_[0]), total_z_mm_from_parts(z_path_[1], piezo_path_[1])]
+                            tz_path = [tz_path_[0], (tz_path_[0] + tz_path_[1]) / 2, tz_path_[1]]
+
+                            self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_CENTER))
+                            az_path = [0] * 3  # actual Z
+                            cz_path = [0] * 3  # computed Z
+                            planarize_state = 'RUN'
+                            planarize_step = 0
+                    else:
+                        if self.jubilee.poi[0] is None or self.jubilee.poi[1] is None or self.jubilee.poi[2] is None:
+                            logging.warning("POIs have not been set, can't planarize!")
+                            planarize_state = 'DONE'
+                        else:
+                            # derive Z-plane equation
+                            p = []
+                            for i in range(3):
+                                p += [np.array((self.jubilee.poi[i].x, self.jubilee.poi[i].y,
+                                                total_z_mm_from_parts(self.jubilee.poi[i].z, self.jubilee.poi[i].piezo)))]
+                            v1 = p[1] - p[0]
+                            v2 = p[2] - p[0]
+                            normal_vector = np.cross(v1, v2)
+                            a, b, c = normal_vector
+                            d = -(a * p[0][0] + b * p[0][1] + c * p[0][2])
+                            if c == 0:
+                                logging.error(f"Plane equation has a poorly formed solution! {a}, {b}, {c}, {d}")
+                                planarize_state = 'DONE'
+
+                            # output some params for debugging later on
+                            debug_fname = self.image_name.name + '/' + 'debug.json'
+                            debug = {
+                                'poi0' : self.jubilee.poi[0],
+                                'poi1' : self.jubilee.poi[1],
+                                'poi2' : self.jubilee.poi[2],
+                                'plane' : [a, b, c, d],
+                            }
+                            with open(debug_fname, 'w') as debugf:
+                                json.dump(debug, debugf, indent=2, cls=CustomEncoder)
+                            self.image_name.set_focus_area((ImageNamer.FOCUS_CENTER, ImageNamer.FOCUS_CENTER))
+
+                            az_path = [0] * 3  # actual Z
+                            cz_path = [0] * 3  # computed Z
+                            x_path = [0] * 3
+                            y_path = [0] * 3
+
+                            # visit the POIs and collect Z-focus
+                            for (i, poi) in enumerate(self.jubilee.poi):
+                                x_path[i] = poi.x
+                                y_path[i] = poi.y
+                            planarize_state = 'RUN'
+
                 elif planarize_state == 'RUN':
                         if not self.fine_focus_event.is_set():
                             if planarize_step > 0:
@@ -1094,7 +1137,7 @@ class Iris():
                                 az_path[planarize_step - 1] = total_z_mm_from_parts(self.jubilee.z, self.piezo.code)
 
                             if planarize_step == 3:
-                                planarize_state = 'DONE'
+                                planarize_state = 'ADJUST'
                             else:
                                 self.fine_focus_event.set()
                                 x = x_path[planarize_step]
@@ -1112,6 +1155,41 @@ class Iris():
                             # wait for focus to run, when it finishes running, fine_focus_event will be
                             # cleared, and planarize_step is incremented
                             pass
+                elif planarize_state == 'ADJUST':
+                    # These constants are the positions of the centerpoints of the spheres where
+                    # the Z-axis drivers make kinematic contact relative to the 0,0 datum on the stage.
+                    z_actuators = [('V', (0, -166.5)), ('Z', (147.5, 163.5)), ('U', (-147.5, 163.5))]
+                    z_steps = [None] * 3
+                    for (i, (_motorname, (zloc_x, zloc_y))) in enumerate(z_actuators):
+                        z_step = -(-(a * zloc_x + b * zloc_y + d) / c)
+                        z_steps[i] = z_step
+
+                    zero_correction = min(z_steps, key=abs)
+
+                    z_steps = [x-zero_correction for x in z_steps]
+
+                    correction_size = max(z_steps, key=abs)
+                    logging.info(f"Correction size: {correction_size}")
+                    # move the Z-axis down by the correction_size
+                    self.jubilee.step_axis('z', abs(correction_size))
+
+                    # split the Z drivers
+                    self.jubilee.send_cmd('M584 Z0.2 U0.3 V0.4') # Z, U, and V drivers
+
+                    # adjust each motor individually
+                    base_z = self.jubilee.z
+                    for i in range(3):
+                        motorname = z_actuators[i][0]
+                        correction = z_steps[i]
+                        z_abs = correction + base_z
+                        logging.info(f"Move {motorname} to {z_abs:0.2f}")
+                        self.jubilee.send_cmd(f'G1 {motorname}{z_abs:0.2f}')
+
+                    # unified-Z configuration
+                    self.jubilee.send_cmd('M584 Z0.2:0.3:0.4') # Map 3 axes for Z to main board ports 2, 3, and 4.
+
+                    planarize_state = 'DONE'
+
                 elif planarize_state == 'DONE':
                     print("Results:")
                     for step in range(3):
@@ -1120,6 +1198,9 @@ class Iris():
 
                     self.planarize_event.clear()
                     self.jubilee.poi = [None] * len(self.jubilee.poi)
+                    # return to home position + correction size: rely on operator to manually bring the Z back to avoid a crash
+                    self.jubilee.goto((0, 0, 10 + abs(correction_size)))
+                    logging.info("Stage returned to 0,0 but with safety margin on Z. Check clearance and use jog knob to restore focus.")
                     planarize_state = 'IDLE'
 
             # Drain the focus queue, run focus if requested
@@ -1291,6 +1372,9 @@ class Iris():
 
                             elif name == 'zset button': # this has been removed
                                 self.set_mid_z()
+                            elif name == 'origin button':
+                                self.jubilee.set_axis('x', 0)
+                                self.jubilee.set_axis('y', 0)
                             elif name == 'gamma button':
                                 if False: # we are depracating gamma and using this button to assist with planarization
                                     if gamma_enabled:
@@ -1429,6 +1513,7 @@ def set_controls(midi_in):
         'recall POI 1 button' : None,
         'recall POI 2 button' : None,
         'recall POI 3 button' : None,
+        'origin button' : None,
         '1050 button' : None,
         'quit button' : None,
         'ESTOP button' : None,
