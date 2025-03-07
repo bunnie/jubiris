@@ -9,6 +9,10 @@ CONTROL_MIN_ROTATION_ANGLE = -80.0 # somewhat not exactly degrees somehow...
 CONTROL_MAX_ROTATION_ANGLE = 80.0
 MIN_JUBILEE_STEP_MM = 0.03 # must be big enough to encompass a focus sweep!
 
+SAFETY_XY = 40.0
+SAFETY_ZMIN = 8.0
+SAFETY_ZMAX = 15.0
+
 class Poi():
     def __init__(self, x, y, z, piezo):
         self.x = x
@@ -87,6 +91,21 @@ class Jubilee:
             self.z += step
         else:
             print('axis not yet implemented')
+
+        if 'x' in axis and abs(self.x) > SAFETY_XY:
+            logging.warning(f"X would step out of range: {self.x}")
+            self.x -= step # undo the step
+            return False
+        elif 'y' in axis and abs(self.y) > SAFETY_XY:
+            logging.warning(f"Y would step out of range: {self.y}")
+            self.y -= step
+            return False
+        elif 'z' in axis and (self.z < SAFETY_ZMIN or self.z > SAFETY_ZMAX): # bind this tightly to a zone around 10.0, which is the default starting value
+            logging.warning(f"Z would step out of range: {self.z}")
+            self.z -= step
+            logging.warning("Requested Z on set_axis() is outside of a conservatively bound range.\nIf the machine is definitely safe, re-zero the motors and try again.")
+            return False
+
         return self.sync_to_mach()
 
     # sets one axis to a value. Only has an effect if the value changes
@@ -97,9 +116,9 @@ class Jubilee:
         updated = False
         if not self.is_on():
             return False # don't return an error, just silently fail
-        if (axis == 'x' or axis == 'y') and abs(value) > 100.0: # outside a reasonable request
+        if (axis == 'x' or axis == 'y') and abs(value) > SAFETY_XY: # outside a reasonable request
             return False
-        if axis == 'z' and (value < 8.0 or value > 15.0): # bind this tightly to a zone around 10.0, which is the default starting value
+        if axis == 'z' and (value < SAFETY_ZMIN or value > SAFETY_ZMAX): # bind this tightly to a zone around 10.0, which is the default starting value
             logging.warning("Requested Z on set_axis() is outside of a conservatively bound range.\nIf the machine is definitely safe, re-zero the motors and try again.")
             return False
 
@@ -172,6 +191,7 @@ class Jubilee:
         self.r = 0.0
         self.send_cmd('G21') # millimeters
         self.send_cmd('G90') # absolute
+        self.send_cmd(f'M208 X{-SAFETY_XY}:{SAFETY_XY} Y{-SAFETY_XY}:{SAFETY_XY} Z{SAFETY_ZMIN}:{SAFETY_ZMAX}') # limits on travel
         self.state = 'ON'
 
     def estop(self):
