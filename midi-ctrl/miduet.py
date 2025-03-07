@@ -113,7 +113,7 @@ FOCUS_HISTO_LIMIT = 85.0 # percentage of image that should be within histogram l
 # (21.65, 12.5)
 # (-21.65, 12.5)
 # (0, -25)
-JOG_THRESH = 30
+JOG_THRESH = 25
 JOG_CENTER = 64
 
 cam_quit = Event()
@@ -1222,9 +1222,18 @@ class Iris():
                                     self.midi.set_led_state(note_id, False)
                                     self.jubilee.motors_off()
                                 else:
-                                    logging.info("Motors are ON and origin is set")
-                                    self.midi.set_led_state(note_id, True)
-                                    self.jubilee.motors_on_set_zero()
+                                    # make sure jog dials are not engaged, otherwise machine will start
+                                    # to immediately "walk" in a direction
+                                    abort = False
+                                    for (name, val) in curvals.items():
+                                        if 'jog' in name:
+                                            if (int(curvals[name]) > JOG_CENTER + JOG_THRESH) or (int(curvals[name]) < JOG_CENTER - JOG_THRESH):
+                                                logging.warning("Jog dials are not zeroed. Aborting machine on!")
+                                                abort = True
+                                    if not abort:
+                                        logging.info("Motors are ON and origin is set")
+                                        self.midi.set_led_state(note_id, True)
+                                        self.jubilee.motors_on_set_zero()
                             elif name == 'ESTOP button':
                                 for (name, val) in curvals.items():
                                     refvals[name] = val
@@ -1238,17 +1247,37 @@ class Iris():
                                 self.midi.set_led_state(note_id, self.light.toggle_1050())
                                 self.light.commit_wavelength()
                             elif 'set POI' in name:
+                                # POIs
+                                # Set POI 1-3 sets the point of interest 1 through 3
+                                # POI 1 is special in that it also sets the absolute 0 reference to POI 1.
+                                # Set "POI P" (the button to the left of POI 1) is used for the special case
+                                # of setting the planarization POI 1. Here, we want the absolute 0 to stay in
+                                # the center of the platform, while setting POI 1.
+                                #
+                                # So, for planarization, the total SOP is like this:
+                                #   - Find the 0 datum, and hit "Set 1" (which sets P1 and 0,0)
+                                #   - Hit the "preload POI" button - this will load approximate X/Y for POI into P1, P2, P3
+                                #   - Use the pre-loads to scan to the approx location, then fine-focus the machine in the round cutout
+                                #     - Find the left datum, and hit "Set P" (which sets P1 without setting zero)
+                                #     - Find the top datum, and hit "Set 2"
+                                #     - Find the bottom datum, and hit "Set 3"
+                                #   - Then run planarize
                                 if not self.jubilee.is_on():
                                     logging.warning("Please turn Jubilee on before setting a POI")
                                     continue
-                                maybe_poi = re.findall(r'^set POI (\d)', name)
+                                maybe_poi = re.findall(r'^set POI ([\dP])', name)
                                 if len(maybe_poi) == 1:
-                                    if int(maybe_poi[0]) == 1: # when setting POI 1, reset machine coords to 0
-                                        logging.info("POI 1 set - note that this should be the top left of the scan area by convention!")
-                                        self.jubilee.motors_on_set_zero()
+                                    if maybe_poi[0] == 'P':
+                                        # set index 1 without setting zero point; used for planarizing
+                                        poi_index = 1
+                                    else:
+                                        poi_index = int(maybe_poi[0])
+                                        if int(maybe_poi[0]) == 1: # when setting POI 1, reset machine coords to 0
+                                            logging.info("POI 1 set - note that this should be the top left of the scan area by convention!")
+                                            self.jubilee.motors_on_set_zero()
                                     self.midi.set_led_state(note_id, True)
-                                    self.jubilee.set_poi(int(maybe_poi[0]), self.piezo.code)
-                                    logging.info(f"Set POI {maybe_poi[0]}. X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {self.total_z_mm():0.3f}")
+                                    self.jubilee.set_poi(poi_index, self.piezo.code)
+                                    logging.info(f"Set POI {poi_index}. X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {self.total_z_mm():0.3f}")
                             elif 'recall POI' in name:
                                 maybe_poi = re.findall(r'^recall POI (\d)', name)
                                 if len(maybe_poi) == 1:
@@ -1260,17 +1289,23 @@ class Iris():
                                         poi = self.current_pos_as_poi()
                                         self.jubilee_state.put(poi, block=False)
 
-                            elif name == 'zset button':
+                            elif name == 'zset button': # this has been removed
                                 self.set_mid_z()
                             elif name == 'gamma button':
-                                if gamma_enabled:
-                                    self.midi.set_led_state(note_id, False)
-                                    gamma_enabled = False
-                                    self.gamma.gamma = 1.0
+                                if False: # we are depracating gamma and using this button to assist with planarization
+                                    if gamma_enabled:
+                                        self.midi.set_led_state(note_id, False)
+                                        gamma_enabled = False
+                                        self.gamma.gamma = 1.0
+                                    else:
+                                        self.midi.set_led_state(note_id, True)
+                                        gamma_enabled = True
+                                        self.gamma.gamma = last_gamma
                                 else:
-                                    self.midi.set_led_state(note_id, True)
-                                    gamma_enabled = True
-                                    self.gamma.gamma = last_gamma
+                                    logging.info("Loading approximate POI locations for planarization")
+                                    self.jubilee.poi[0] = Poi(25, 0, 10, 8192)
+                                    self.jubilee.poi[1] = Poi(-11.4, 21, 10, 8192)
+                                    self.jubilee.poi[2] = Poi(-11.4, -21, 10, 8192)
                             elif name == 'report position button':
                                 try:
                                     logging.info(f"X: {self.jubilee.x:0.2f}, Y: {self.jubilee.y:0.2f}, Z: {self.jubilee.z:0.2f}, P: {self.piezo.code}, Z': {self.total_z_mm():0.3f}")
@@ -1310,40 +1345,54 @@ class Iris():
             # now update machine position based on values
             if valid:
                 for (name, val) in curvals.items():
-                    if refvals[name] is not None:
-                        if paused_axis is not None:
-                            if paused_axis in name:
-                                continue
+                    # handle jog case
+                    if 'jog' in name and val is not None:
+                        step = 0.0
+                        if int(val) < (JOG_CENTER - JOG_THRESH):
+                            step = 0.2
+                        elif int(val) > (JOG_CENTER + JOG_THRESH):
+                            step = -0.2
 
-                        # handle jog case - this sets a step that can be overridden by the delta sliders
-                        if 'jog' in name:
-                            if curvals[name] > JOG_CENTER + JOG_THRESH:
-                                step = 0.2
-                            elif curvals[name] < JOG_CENTER - JOG_THRESH:
-                                step = -0.2
-
-                        # compute deltas
-                        delta = int(curvals[name]) - int(refvals[name])
-                        refvals[name] = curvals[name] # reset ref
-                        if delta > 0:
-                            if 'coarse' in name:
-                                step = 0.2
-                            else:
-                                step = 0.05
-                        elif delta < 0:
-                            if 'coarse' in name:
-                                step = -0.2
-                            else:
-                                step = -0.05
-                        else:
-                            step = 0.0
+                        # fixup hacks for more intuitive direction control
+                        if 'y' in name:
+                            step = -step
                         if 'z' in name:
-                            step = -(step / 5.0) # Z 0 is "up", make slider's direction correspond to stage direction
-                        logging.debug(f"Delta of {delta} for {name}")
+                            step = -(step / 5.0)
 
-                        if self.jubilee.step_axis(name, step):
-                            logging.warning("Motor command timeout!")
-                            self.midi.clear_events()
+                        if step != 0.0:
+                            if self.jubilee.step_axis(name, step):
+                                logging.warning("Motor command timeout!")
+                                self.midi.clear_events()
+                            break
+
+                    if 'jog' not in name:
+                        if refvals[name] is not None:
+                            if paused_axis is not None:
+                                if paused_axis in name:
+                                    continue
+
+                            # compute deltas
+                            delta = int(curvals[name]) - int(refvals[name])
+                            refvals[name] = curvals[name] # reset ref
+                            if delta > 0:
+                                if 'coarse' in name:
+                                    step = 0.2
+                                else:
+                                    step = 0.05
+                            elif delta < 0:
+                                if 'coarse' in name:
+                                    step = -0.2
+                                else:
+                                    step = -0.05
+                            else:
+                                step = 0.0
+                            if 'z' in name:
+                                step = -(step / 5.0) # Z 0 is "up", make slider's direction correspond to stage direction
+                            logging.debug(f"Delta of {delta} for {name}")
+
+                            if self.jubilee.step_axis(name, step):
+                                logging.warning("Motor command timeout!")
+                                self.midi.clear_events()
                 # update the UI thread
                 poi = self.current_pos_as_poi()
                 self.jubilee_state.put(poi, block=False)
@@ -1376,6 +1425,7 @@ def set_controls(midi_in):
         'set POI 1 button' : None,
         'set POI 2 button' : None,
         'set POI 3 button' : None,
+        'set POI P button' : None,
         'recall POI 1 button' : None,
         'recall POI 2 button' : None,
         'recall POI 3 button' : None,
