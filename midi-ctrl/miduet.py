@@ -101,6 +101,21 @@ FOCUS_RSQUARE_LIMIT = 0.03 # 0.05 loose # multiply by mean of focus metric to ge
 FOCUS_RATIO_LIMIT = 0.995 # minimum ratio of actual vs predicted focus metric
 FOCUS_HISTO_LIMIT = 85.0 # percentage of image that should be within histogram limits
 
+# Bed adjustment points
+# (0, 0) is the center of the plane
+# left is -y
+# up is -x
+# (0, -166.5)
+# (147.5, 163.5)
+# (-147.5, 163.5)
+#
+# Measurement points that define the plane
+# (21.65, 12.5)
+# (-21.65, 12.5)
+# (0, -25)
+JOG_THRESH = 30
+JOG_CENTER = 64
+
 cam_quit = Event()
 
 class Gamma:
@@ -1300,6 +1315,14 @@ class Iris():
                             if paused_axis in name:
                                 continue
 
+                        # handle jog case - this sets a step that can be overridden by the delta sliders
+                        if 'jog' in name:
+                            if curvals[name] > JOG_CENTER + JOG_THRESH:
+                                step = 0.2
+                            elif curvals[name] < JOG_CENTER - JOG_THRESH:
+                                step = -0.2
+
+                        # compute deltas
                         delta = int(curvals[name]) - int(refvals[name])
                         refvals[name] = curvals[name] # reset ref
                         if delta > 0:
@@ -1333,6 +1356,9 @@ def set_controls(midi_in):
         'x-coarse' : None,
         'y-coarse' : None,
         'z-coarse' : None,
+        "x-jog": None,
+        "y-jog": None,
+        "z-jog": None,
         'x-fine' : None,
         'y-fine' : None,
         'z-fine' : None,

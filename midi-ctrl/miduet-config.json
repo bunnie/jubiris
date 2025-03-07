@@ -3,6 +3,9 @@
     "x-coarse": "control=52",
     "y-coarse": "control=56",
     "z-coarse": "control=60",
+    "x-jog": "control=51",
+    "y-jog": "control=55",
+    "z-jog": "control=59",
     "x-fine": "control=53",
     "y-fine": "control=57",
     "z-fine": "control=61",
@@ -30,3 +33,5 @@
     "zset button": "note=4",
     "ESTOP button": "note=26"
 }
+
+51 55 59
